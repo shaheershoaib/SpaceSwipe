@@ -11,8 +11,9 @@ when you let go. Your other monitors stay where they are.
 
 - 🖐️ **Finger-tracked**: the slide follows your fingers. A flick or a drag past about 30% switches, anything less springs back.
 - 🖥️ **Per monitor**: like macOS with *"Displays have separate Spaces"* turned on. Windows' own virtual desktops switch every monitor at once.
+- 🪟 **Overview, like Mission Control**: swipe up with three fingers and the current app shrinks, following your fingers, into a row of live cards with every space on that monitor. Click one to zoom into it.
 - 🏠 **Desktop space**: the first space on each monitor is its desktop with your normal windows. Three-finger swipe down jumps straight to it.
-- ⌨️ **Alt+Tab still works**, and so do the taskbar and Task View (three-finger swipe up).
+- ⌨️ **Alt+Tab still works**, and so do the taskbar and Win+Tab.
 - 🪶 **Small and self-contained**: one exe, no admin rights, no .NET install needed. It runs from the tray.
 
 ## Install
@@ -36,15 +37,22 @@ when you let go. Your other monitors stay where they are.
 | Gesture | What it does |
 |---|---|
 | Three-finger drag left / right | Slide to the next / previous full-screen app **on the monitor under the cursor** |
-| Three-finger swipe up | Task View |
+| Three-finger drag up | That monitor's overview: its spaces as live cards (follows your fingers; let go to open) |
+| In the overview | Click a card, or `←` `→` + `Enter`, to switch. `Esc`, a click on the background, or a three-finger swipe down closes it |
 | Three-finger swipe down | That monitor's desktop space |
-| `Ctrl` + `Alt` + `Win` + `←` / `→` / `↓` | The same from the keyboard |
+| `Ctrl` + `Alt` + `Win` + `←` / `→` / `↑` / `↓` | The same from the keyboard |
+
+Prefer Windows' Task View for swipe up? Untick *Swipe up shows app overview* in the tray menu.
 
 A *space* is any maximized or full-screen (F11, borderless) window. Spaces stay in a stable order and new ones are added at
 the end. Minimized windows aren't spaces, the same as on macOS.
 
 Right-click the tray icon to pause SpaceSwipe, turn the animation off, toggle *Start with Windows*, reopen setup, view the
 log, or uninstall.
+
+## Update
+
+Download the latest `SpaceSwipe.exe` and run it. It replaces the installed copy and restarts SpaceSwipe, keeping your settings.
 
 ## Uninstall
 
@@ -64,6 +72,10 @@ Afterwards you can set *Touchpad → Three-finger gestures → Swipes* back to *
   wrong or half-drawn frame mid-swipe. Parked windows stay full size and fully drawn, so they slide back in instantly.
   A parked app comes straight back if you pick it with Alt+Tab, the taskbar or Task View. All parked apps come back
   if SpaceSwipe exits or crashes, or if your monitors change (e.g. a KVM switch).
+- **The overview:** the whole animation is driven by one progress value tied to your fingers. The current app is an
+  exact screenshot that shrinks into its card while the background blurs. The other spaces are live window previews
+  (DWM thumbnails) that fade in. When you pick one, SpaceSwipe switches to it behind the overview, takes a
+  screenshot, and grows that to full screen, so the hand-off to the real app is seamless.
 
 ## Build from source
 

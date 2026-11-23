@@ -3,8 +3,6 @@ using static SpaceSwipe.Native;
 
 namespace SpaceSwipe;
 
-/// <summary>Direction the fingers moved.</summary>
-internal enum Swipe { Left = 1, Right = 2, Up = 3, Down = 4 }
 
 /// <summary>
 /// Reads raw Precision Touchpad reports (HID digitizer, usage page 0x0D / usage 0x05)
@@ -22,7 +20,7 @@ internal sealed class TouchpadGestures
 
     readonly record struct Contact(bool Tip, int X, int Y);
 
-    enum Mode { Idle, Pending, Drag, Done }
+    enum Mode { Idle, Pending, Drag, VDrag, Done }
 
     readonly Dictionary<IntPtr, Device?> devices = new();
     readonly List<Contact> frame = new();
@@ -30,17 +28,19 @@ internal sealed class TouchpadGestures
     readonly List<(long T, double Fx)> samples = new();
     int expected;
     Mode mode;
-    double sx, sy, lastFx;
+    double sx, sy, lastValue;
     long lastFrameMs;
 
-    /// <summary>Vertical swipe distance, as a fraction of the touchpad width.</summary>
-    public double Threshold { get; set; } = 0.10;
-    /// <summary>Horizontal movement before a drag starts, as a fraction of the touchpad width.</summary>
+    /// <summary>Movement before a drag starts, as a fraction of the touchpad width.</summary>
     public double DeadZone { get; set; } = 0.02;
     public bool LogFrames { get; set; }
 
-    /// <summary>Discrete vertical swipes.</summary>
-    public event Action<Swipe>? Swiped;
+    /// <summary>A vertical three-finger drag started (true = upwards).</summary>
+    public event Action<bool>? VDragBegan;
+    /// <summary>Vertical travel since the drag started, in touchpad widths (negative = up).</summary>
+    public event Action<double>? VDragMoved;
+    /// <summary>Vertical drag finished: final travel and velocity (touchpad widths per second, negative = up).</summary>
+    public event Action<double, double>? VDragEnded;
     /// <summary>A horizontal three-finger drag started.</summary>
     public event Action? DragBegan;
     /// <summary>Horizontal finger travel since the drag started, as a fraction of the touchpad width (negative = left).</summary>
@@ -193,7 +193,7 @@ internal sealed class TouchpadGestures
     /// <summary>Called on a timer: ends a drag if the touchpad stopped sending frames.</summary>
     public void CheckTimeout()
     {
-        if (mode == Mode.Drag && Environment.TickCount64 - lastFrameMs > 300)
+        if (mode is Mode.Drag or Mode.VDrag && Environment.TickCount64 - lastFrameMs > 300)
         {
             Log.Write("drag timed out (no touch frames)");
             EndDrag();
@@ -206,7 +206,7 @@ internal sealed class TouchpadGestures
         long now = Environment.TickCount64;
         if (now - lastFrameMs > 250)
         {
-            if (mode == Mode.Drag) EndDrag();
+            if (mode is Mode.Drag or Mode.VDrag) EndDrag();
             mode = Mode.Idle;
         }
         lastFrameMs = now;
@@ -222,15 +222,15 @@ internal sealed class TouchpadGestures
 
         if (n == 0)
         {
-            if (mode == Mode.Drag) EndDrag();
+            if (mode is Mode.Drag or Mode.VDrag) EndDrag();
             mode = Mode.Idle;
             return;
         }
         if (n != 3)
         {
-            if (mode == Mode.Drag) EndDrag();
+            if (mode is Mode.Drag or Mode.VDrag) EndDrag();
             // Fewer fingers while still landing: wait. More fingers, or a finished gesture: wait for a full lift.
-            mode = n > 3 || mode is Mode.Drag or Mode.Done ? Mode.Done : Mode.Idle;
+            mode = n > 3 || mode is Mode.Drag or Mode.VDrag or Mode.Done ? Mode.Done : Mode.Idle;
             return;
         }
         if (mode == Mode.Done) return;
@@ -244,34 +244,42 @@ internal sealed class TouchpadGestures
             return;
         }
 
-        double fx = (cx - sx) / width, fy = (cy - sy) / width;
+        double fx = (cx - sx) / width, fy = (cy - sy) / width; // both in touchpad widths
         if (mode == Mode.Pending)
         {
             if (Math.Abs(fx) >= DeadZone && Math.Abs(fx) > 1.2 * Math.Abs(fy))
             {
                 mode = Mode.Drag;
-                sx = cx; // start the frame from where the drag was recognised, so it doesn't jump
-                lastFx = 0;
-                samples.Clear();
-                samples.Add((now, 0));
+                sx = cx; // start from where the drag was recognised, so nothing jumps
+                StartSamples(now);
                 Log.Write("drag begin");
                 DragBegan?.Invoke();
             }
-            else if (Math.Abs(fy) >= Threshold * 0.8 && Math.Abs(fy) > 1.4 * Math.Abs(fx))
+            else if (Math.Abs(fy) >= DeadZone && Math.Abs(fy) > 1.2 * Math.Abs(fx))
             {
-                mode = Mode.Done;
-                var s = fy < 0 ? Swipe.Up : Swipe.Down;
-                Log.Write("swipe " + s);
-                Swiped?.Invoke(s);
+                mode = Mode.VDrag;
+                bool up = fy < 0;
+                sy = cy;
+                StartSamples(now);
+                Log.Write($"vertical drag begin ({(up ? "up" : "down")})");
+                VDragBegan?.Invoke(up);
             }
             return;
         }
 
-        // Mode.Drag
-        lastFx = fx;
-        samples.Add((now, fx));
+        double v = mode == Mode.Drag ? fx : fy;
+        lastValue = v;
+        samples.Add((now, v));
         if (samples.Count > 64) samples.RemoveRange(0, samples.Count - 64);
-        DragMoved?.Invoke(fx);
+        if (mode == Mode.Drag) DragMoved?.Invoke(v);
+        else VDragMoved?.Invoke(v);
+    }
+
+    void StartSamples(long now)
+    {
+        lastValue = 0;
+        samples.Clear();
+        samples.Add((now, 0));
     }
 
     void EndDrag()
@@ -284,7 +292,9 @@ internal sealed class TouchpadGestures
             double dt = last.T - first.T;
             if (dt >= 8) v = (last.Fx - first.Fx) / dt * 1000.0;
         }
-        Log.Write($"drag end fx={lastFx:F3} v={v:F2}/s");
-        DragEnded?.Invoke(lastFx, v);
+        bool vertical = mode == Mode.VDrag;
+        Log.Write($"{(vertical ? "vertical " : "")}drag end travel={lastValue:F3} v={v:F2}/s");
+        if (vertical) VDragEnded?.Invoke(lastValue, v);
+        else DragEnded?.Invoke(lastValue, v);
     }
 }

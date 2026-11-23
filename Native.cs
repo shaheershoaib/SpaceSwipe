@@ -16,6 +16,20 @@ internal struct RECT
 internal struct POINT { public int X, Y; }
 
 [StructLayout(LayoutKind.Sequential)]
+internal struct SIZE { public int cx, cy; }
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct DWM_THUMBNAIL_PROPERTIES
+{
+    public uint dwFlags;
+    public RECT rcDestination;
+    public RECT rcSource;
+    public byte opacity;
+    public int fVisible;
+    public int fSourceClientAreaOnly;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 internal struct WINDOWPLACEMENT
 {
     public int length, flags, showCmd;
@@ -76,7 +90,7 @@ internal static class Native
     public const uint SWP_NOACTIVATE = 0x10, SWP_SHOWWINDOW = 0x40;
     public static readonly IntPtr HWND_TOPMOST = new(-1);
     public const uint SRCCOPY = 0x00CC0020, BLACKNESS = 0x00000042;
-    public const int DWMWA_TRANSITIONS_FORCEDISABLED = 3, DWMWA_CLOAKED = 14;
+    public const int DWMWA_TRANSITIONS_FORCEDISABLED = 3, DWMWA_CLOAK = 13, DWMWA_CLOAKED = 14;
     public const uint RID_INPUT = 0x10000003, RIDI_PREPARSEDDATA = 0x20000005, RIDEV_INPUTSINK = 0x100, RIM_TYPEHID = 2;
     public const int HIDP_STATUS_SUCCESS = 0x00110000, HidP_Input = 0;
     public const uint INPUT_KEYBOARD = 1, KEYEVENTF_EXTENDEDKEY = 1, KEYEVENTF_KEYUP = 2;
@@ -138,10 +152,39 @@ internal static class Native
     [DllImport("gdi32.dll")] public static extern bool DeleteDC(IntPtr dc);
     [DllImport("gdi32.dll")] public static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, uint rop);
     [DllImport("gdi32.dll")] public static extern bool PatBlt(IntPtr dc, int x, int y, int w, int h, uint rop);
+    [DllImport("gdi32.dll")] public static extern bool StretchBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, int sw, int sh, uint rop);
+    [DllImport("gdi32.dll")] public static extern int SetStretchBltMode(IntPtr dc, int mode);
+    [DllImport("msimg32.dll")] public static extern bool AlphaBlend(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, int sw, int sh, uint blend);
+    public const int COLORONCOLOR = 3, HALFTONE = 4;
+
+    /// <summary>BLENDFUNCTION packed for AlphaBlend: constant alpha, no per-pixel alpha.</summary>
+    public static uint ConstantAlpha(byte a) => (uint)a << 16;
 
     [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int value, int size);
     [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int value, int size);
     [DllImport("dwmapi.dll")] public static extern int DwmFlush();
+    [DllImport("dwmapi.dll")] public static extern int DwmRegisterThumbnail(IntPtr dest, IntPtr src, out IntPtr thumb);
+    [DllImport("dwmapi.dll")] public static extern int DwmUnregisterThumbnail(IntPtr thumb);
+    [DllImport("dwmapi.dll")] public static extern int DwmUpdateThumbnailProperties(IntPtr thumb, ref DWM_THUMBNAIL_PROPERTIES props);
+    [DllImport("dwmapi.dll")] public static extern int DwmQueryThumbnailSourceSize(IntPtr thumb, out SIZE size);
+    public const uint DWM_TNP_RECTDESTINATION = 0x1, DWM_TNP_RECTSOURCE = 0x2, DWM_TNP_OPACITY = 0x4, DWM_TNP_VISIBLE = 0x8;
+
+    [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr h, int msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
+    [DllImport("user32.dll", EntryPoint = "GetClassLongPtrW")] public static extern IntPtr GetClassLongPtr(IntPtr h, int index);
+    [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SystemParametersInfoW")]
+    public static extern bool SystemParametersInfoString(uint action, uint param, StringBuilder buf, uint winIni);
+    public const int WM_GETICON = 0x007F, ICON_BIG = 1, ICON_SMALL2 = 2, GCLP_HICON = -14;
+    public const uint SMTO_ABORTIFHUNG = 0x2, SPI_GETDESKWALLPAPER = 0x0073;
+
+    /// <summary>The window's own icon (big), or zero.</summary>
+    public static IntPtr WindowIcon(IntPtr h)
+    {
+        SendMessageTimeout(h, WM_GETICON, (IntPtr)ICON_BIG, IntPtr.Zero, SMTO_ABORTIFHUNG, 50, out var icon);
+        if (icon == IntPtr.Zero) SendMessageTimeout(h, WM_GETICON, (IntPtr)ICON_SMALL2, IntPtr.Zero, SMTO_ABORTIFHUNG, 50, out icon);
+        if (icon == IntPtr.Zero) icon = GetClassLongPtr(h, GCLP_HICON);
+        return icon;
+    }
 
     [DllImport("shell32.dll")] public static extern int SHQueryUserNotificationState(out int state);
 

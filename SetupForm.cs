@@ -77,7 +77,7 @@ internal sealed class SetupForm : Form
         layout.Controls.Add(new Label
         {
             Text = "Gestures: three-finger drag left/right switches apps on the monitor under the cursor · " +
-                   "up opens Task View · down shows that monitor's desktop. Keyboard: Ctrl+Alt+Win + ←/→/↓.",
+                   "up opens that monitor's app overview · down shows its desktop. Keyboard: Ctrl+Alt+Win + ←/→/↑/↓.",
             AutoSize = true,
             MaximumSize = new Size(540, 0),
             ForeColor = SystemColors.GrayText,

@@ -17,9 +17,9 @@ internal sealed class SpaceSwitcher(WindowTracker tracker, SlideOverlay overlay,
         public WinInfo? Cur;
         public int Ci;
 
-        public static Context Capture(WindowTracker tracker)
+        public static Context Capture(WindowTracker tracker, MonitorDesc? on = null)
         {
-            var mon = WindowTracker.MonitorAtCursor();
+            var mon = on ?? WindowTracker.MonitorAtCursor();
             var snap = tracker.Snapshot();
             var present = snap.Where(w => w.Monitor == mon.Device).ToDictionary(w => w.Hwnd);
             var spaces = new List<IntPtr> { IntPtr.Zero };
@@ -38,11 +38,85 @@ internal sealed class SpaceSwitcher(WindowTracker tracker, SlideOverlay overlay,
             "[" + string.Join(" | ", Spaces.Select(h => h == IntPtr.Zero ? "Desktop" : Short(Present[h].Title))) + "]";
     }
 
+    /// <summary>While true (e.g. the overview is open), swipes and shortcuts are ignored.</summary>
+    public Func<bool>? Suspended { get; set; }
+
+    /// <summary>One space as shown in the overview.</summary>
+    public sealed record SpaceItem(IntPtr Hwnd, string Title, WinKind Kind, bool Current);
+
+    /// <summary>The spaces of the monitor under the cursor (Desktop first), or null if there is nothing to show.</summary>
+    public (MonitorDesc Mon, List<SpaceItem> Spaces)? GetSpaces()
+    {
+        if (!CanAct(out _)) return null;
+        var ctx = Context.Capture(tracker);
+        var items = ctx.Spaces.Select((h, i) => h == IntPtr.Zero
+            ? new SpaceItem(IntPtr.Zero, "Desktop", WinKind.None, i == ctx.Ci)
+            : new SpaceItem(h, ctx.Present[h].Title, ctx.Present[h].Kind, i == ctx.Ci)).ToList();
+        return (ctx.Mon, items);
+    }
+
+    /// <summary>
+    /// Photograph a monitor's desktop even while apps cover it: park them for a moment (instant, no redraw),
+    /// capture, and put them back. Call only while something covers the monitor (the overview does).
+    /// </summary>
+    public Shot? CaptureDesktop(MonitorDesc mon)
+    {
+        try
+        {
+            var ctx = Context.Capture(tracker, mon);
+            var showing = ctx.Present.Values.Where(w => w.IsShowing).Select(w => w.Hwnd).ToList();
+            foreach (var h in showing) parking.Park(h, mon.Device);
+            DwmFlush();
+            Thread.Sleep(30);
+            DwmFlush();
+            var shot = Shot.Capture(mon.Work);
+            foreach (var h in showing) parking.Unpark(h);
+            DesktopCache.Set(mon.Device, shot);
+            return DesktopCache.CopyOf(mon.Device);
+        }
+        catch (Exception ex)
+        {
+            Log.Write("desktop capture failed: " + ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>Shortly after switching to a desktop space, remember what it looks like (for the overview).</summary>
+    void RefreshDesktopCacheSoon(MonitorDesc mon)
+    {
+        var timer = new System.Windows.Forms.Timer { Interval = 400 };
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            timer.Dispose();
+            try
+            {
+                var ctx = Context.Capture(tracker, mon);
+                if (ctx.Present.Values.Any(w => w.IsShowing)) return; // no longer on the desktop
+                DesktopCache.Set(mon.Device, Shot.Capture(mon.Work));
+            }
+            catch (Exception ex) { Log.Write("desktop cache refresh failed: " + ex.Message); }
+        };
+        timer.Start();
+    }
+
+    /// <summary>Switch a monitor straight to one of its spaces (used by the overview; no slide).</summary>
+    public void ActivateSpace(MonitorDesc mon, IntPtr target)
+    {
+        try
+        {
+            var ctx = Context.Capture(tracker, mon);
+            if (target != IntPtr.Zero && !ctx.Present.ContainsKey(target)) return; // closed meanwhile
+            SwitchTo(ctx, target, out _);
+        }
+        catch (Exception ex) { Log.Write("activate space failed: " + ex); }
+    }
+
     /// <summary>False when there is nothing sensible to act on (e.g. a game is running, or a KVM switched the screens away).</summary>
     bool CanAct(out MonitorDesc mon)
     {
         mon = WindowTracker.MonitorAtCursor();
-        if (!settings.Enabled) return false;
+        if (!settings.Enabled || (Suspended?.Invoke() ?? false)) return false;
         if (SHQueryUserNotificationState(out int state) == 0 && state == QUNS_RUNNING_D3D_FULL_SCREEN)
         {
             Log.Write("skip: exclusive full-screen game running");
@@ -110,6 +184,7 @@ internal sealed class SpaceSwitcher(WindowTracker tracker, SlideOverlay overlay,
             }
             var next = tracker.TopWindowOn(ctx.Mon.Device);
             Focus(next != IntPtr.Zero ? next : GetShellWindow());
+            RefreshDesktopCacheSoon(ctx.Mon);
             return false;
         }
 

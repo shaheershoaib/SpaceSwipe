@@ -24,6 +24,15 @@ internal sealed class Shot : IDisposable
 
     public static Shot Blank(int w, int h) => new(w, h);
 
+    /// <summary>Copy a managed bitmap into a GDI bitmap (for fast blits).</summary>
+    public static Shot FromBitmap(Bitmap b)
+    {
+        var s = new Shot(b.Width, b.Height);
+        using var g = Graphics.FromHdc(s.Dc);
+        g.DrawImageUnscaled(b, 0, 0);
+        return s;
+    }
+
     /// <summary>
     /// Copies a region of the composited desktop, exactly as it looks on screen (HDR tone mapping included).
     /// Windows marked exclude-from-capture (our overlay) are not included.

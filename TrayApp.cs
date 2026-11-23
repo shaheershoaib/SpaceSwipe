@@ -46,6 +46,21 @@ internal static class Program
 
         var settings = Settings.Load();
 
+        if (!Installer.IsRunningInstalled && settings.SetupDone && File.Exists(Installer.InstalledExe))
+        {
+            // A newer download while SpaceSwipe is already set up: upgrade in place, no questions.
+            StopRunningInstance();
+            try { Installer.Install(Startup.IsEnabled); }
+            catch (Exception ex)
+            {
+                MessageBox.Show("SpaceSwipe couldn't be updated:\n\n" + ex.Message, "SpaceSwipe",
+                                MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+            Process.Start(new ProcessStartInfo(Installer.InstalledExe) { UseShellExecute = true });
+            return;
+        }
+
         if (!Installer.IsRunningInstalled)
         {
             // Launched from a download: show setup, install a copy, and hand over to it.
@@ -115,6 +130,8 @@ internal sealed class Settings
     public double FlickSpeed { get; set; } = 1.0;
     public double DragDeadZone { get; set; } = 0.02;
     public bool SwipeUpTaskView { get; set; } = true;
+    /// <summary>Three-finger swipe up opens SpaceSwipe's per-monitor overview (otherwise Windows Task View).</summary>
+    public bool SwipeUpOverview { get; set; } = true;
     public bool SwipeDownShowsDesktop { get; set; } = true;
     public bool LogTouchFrames { get; set; }
     public bool SetupDone { get; set; }
@@ -204,8 +221,8 @@ internal sealed class MessageWindow : NativeWindow
 
 internal sealed class TrayContext : ApplicationContext
 {
-    const int HK_PREV = 1, HK_NEXT = 2, HK_DESKTOP = 3;
-    const int WM_SWIPE = WM_APP + 1, WM_EXIT_REQUEST = WM_APP + 2;
+    const int HK_PREV = 1, HK_NEXT = 2, HK_DESKTOP = 3, HK_OVERVIEW = 4;
+    const int WM_EXIT_REQUEST = WM_APP + 2;
 
     readonly Settings settings;
     readonly WindowTracker tracker = new();
@@ -215,6 +232,7 @@ internal sealed class TrayContext : ApplicationContext
     readonly SpaceSwitcher switcher;
     readonly Parking parking = new();
     readonly NotifyIcon tray;
+    OverviewForm? overview;
     readonly System.Windows.Forms.Timer touchTimer = new() { Interval = 100 };
 
     public TrayContext(Settings settings)
@@ -234,12 +252,13 @@ internal sealed class TrayContext : ApplicationContext
         tracker.OwnWindows.Add(overlay.Handle);
         tracker.OwnWindows.Add(msg.Handle);
         tracker.Parking = parking;
-        switcher = new SpaceSwitcher(tracker, overlay, settings, parking);
+        switcher = new SpaceSwitcher(tracker, overlay, settings, parking) { Suspended = () => overview != null };
 
-        gestures.Threshold = settings.SwipeThreshold;
         gestures.DeadZone = settings.DragDeadZone;
         gestures.LogFrames = settings.LogTouchFrames;
-        gestures.Swiped += s => PostMessage(msg.Handle, WM_SWIPE, (IntPtr)(int)s, IntPtr.Zero);
+        gestures.VDragBegan += OnVDragBegan;
+        gestures.VDragMoved += OnVDragMoved;
+        gestures.VDragEnded += OnVDragEnded;
         // Drags are handled inline (on the UI thread, inside WM_INPUT) so the frame tracks the fingers.
         gestures.DragBegan += switcher.DragBegin;
         gestures.DragMoved += switcher.DragMove;
@@ -255,6 +274,7 @@ internal sealed class TrayContext : ApplicationContext
         RegisterKey(HK_PREV, mods, VK_LEFT);
         RegisterKey(HK_NEXT, mods, VK_RIGHT);
         RegisterKey(HK_DESKTOP, mods, VK_DOWN);
+        RegisterKey(HK_OVERVIEW, mods, VK_UP);
 
         tracker.Snapshot(); // seed the per-monitor order
 
@@ -293,10 +313,8 @@ internal sealed class TrayContext : ApplicationContext
                     case HK_PREV: switcher.Navigate(-1); break;
                     case HK_NEXT: switcher.Navigate(+1); break;
                     case HK_DESKTOP: switcher.GoDesktop(); break;
+                    case HK_OVERVIEW: ToggleOverview(); break;
                 }
-                break;
-            case WM_SWIPE:
-                OnSwipe((Swipe)(int)m.WParam);
                 break;
             case WM_EXIT_REQUEST:
                 ExitThread();
@@ -309,16 +327,99 @@ internal sealed class TrayContext : ApplicationContext
         }
     }
 
-    void OnSwipe(Swipe s)
+    // ---------------- vertical three-finger drags ----------------
+
+    enum VMode { None, OpeningOverview, ClosingOverview, Down, UpTaskView }
+    VMode vmode;
+
+    /// <summary>Finger travel (touchpad widths) that fully opens or closes the overview.</summary>
+    const double OverviewTravel = 0.20;
+    /// <summary>Travel or speed that counts as a deliberate up/down swipe.</summary>
+    const double SwipeTravel = 0.08, SwipeSpeed = 0.5;
+
+    void OnVDragBegan(bool up)
     {
+        vmode = VMode.None;
         if (!settings.Enabled) return;
-        switch (s)
+        if (overview != null)
         {
-            // Left/right are finger-tracked drags (DragBegin/Move/End); only vertical swipes arrive here.
-            case Swipe.Up when settings.SwipeUpTaskView:
+            if (overview.IsOpen && !up) vmode = VMode.ClosingOverview;
+            return;
+        }
+        if (up && settings.SwipeUpOverview)
+        {
+            var form = CreateOverview();
+            if (form == null) return;
+            form.BeginOpen();
+            vmode = VMode.OpeningOverview;
+        }
+        else if (up) vmode = settings.SwipeUpTaskView ? VMode.UpTaskView : VMode.None;
+        else vmode = settings.SwipeDownShowsDesktop ? VMode.Down : VMode.None;
+    }
+
+    void OnVDragMoved(double travel) // negative = up
+    {
+        switch (vmode)
+        {
+            case VMode.OpeningOverview: overview?.DragOpen(-travel / OverviewTravel); break;
+            case VMode.ClosingOverview: overview?.DragClose(Math.Max(0, travel) / OverviewTravel); break;
+        }
+    }
+
+    void OnVDragEnded(double travel, double velocity)
+    {
+        var mode = vmode;
+        vmode = VMode.None;
+        switch (mode)
+        {
+            case VMode.OpeningOverview:
+            {
+                double p = -travel / OverviewTravel;
+                bool open = (p > 0.3 || velocity < -SwipeSpeed) && velocity < SwipeSpeed;
+                overview?.EndOpen(open);
+                break;
+            }
+            case VMode.ClosingOverview:
+            {
+                double t = travel / OverviewTravel;
+                bool close = (t > 0.3 || velocity > SwipeSpeed) && velocity > -SwipeSpeed;
+                overview?.EndClose(close);
+                break;
+            }
+            case VMode.Down when travel >= SwipeTravel || velocity > SwipeSpeed:
+                switcher.GoDesktop();
+                break;
+            case VMode.UpTaskView when -travel >= SwipeTravel || velocity < -SwipeSpeed:
                 Send(Key(VK_LWIN, false), Key(VK_TAB, false), Key(VK_TAB, true), Key(VK_LWIN, true));
                 break;
-            case Swipe.Down when settings.SwipeDownShowsDesktop: switcher.GoDesktop(); break;
+        }
+    }
+
+    /// <summary>Keyboard shortcut: open the overview with its animation, or close it.</summary>
+    void ToggleOverview()
+    {
+        if (overview != null) { if (overview.IsOpen) overview.Dismiss(); return; }
+        CreateOverview()?.OpenAnimated();
+    }
+
+    OverviewForm? CreateOverview()
+    {
+        if (switcher.GetSpaces() is not { } s) return null;
+        try
+        {
+            var mon = s.Mon;
+            var form = new OverviewForm(mon, s.Spaces, () => switcher.CaptureDesktop(mon));
+            form.Chosen += h => switcher.ActivateSpace(mon, h);
+            form.FormClosed += (_, _) => { if (overview == form) overview = null; form.Dispose(); };
+            overview = form;
+            Log.Write($"{mon.Device}: overview with {s.Spaces.Count} space(s)");
+            return form;
+        }
+        catch (Exception ex)
+        {
+            Log.Write("overview failed: " + ex);
+            overview = null;
+            return null;
         }
     }
 
@@ -330,6 +431,8 @@ internal sealed class TrayContext : ApplicationContext
 
         menu.Items.Add(Toggle("Enabled", settings.Enabled, v => { settings.Enabled = v; settings.Save(); }));
         menu.Items.Add(Toggle("Slide animation", settings.Animate, v => { settings.Animate = v; settings.Save(); }));
+        menu.Items.Add(Toggle("Swipe up shows app overview (off = Task View)", settings.SwipeUpOverview,
+            v => { settings.SwipeUpOverview = v; settings.Save(); }));
         var startup = Toggle("Start with Windows", Startup.IsEnabled, v => Startup.Set(v));
         menu.Items.Add(startup);
         menu.Items.Add(new ToolStripMenuItem("Setup…", null, (_, _) =>
@@ -345,9 +448,9 @@ internal sealed class TrayContext : ApplicationContext
         foreach (var line in new[]
                  {
                      "3-finger drag left / right: move between apps on this monitor",
-                     "3 fingers up: Task View",
+                     "3 fingers up: this monitor's app overview",
                      "3 fingers down: this monitor's desktop",
-                     "Keyboard: Ctrl+Alt+Win + Left / Right / Down",
+                     "Keyboard: Ctrl+Alt+Win + Left / Right / Up / Down",
                  })
             help.DropDownItems.Add(new ToolStripMenuItem(line) { Enabled = false });
         menu.Items.Add(help);
@@ -388,6 +491,8 @@ internal sealed class TrayContext : ApplicationContext
         UnregisterHotKey(msg.Handle, HK_PREV);
         UnregisterHotKey(msg.Handle, HK_NEXT);
         UnregisterHotKey(msg.Handle, HK_DESKTOP);
+        UnregisterHotKey(msg.Handle, HK_OVERVIEW);
+        overview?.Close();
         overlay.Dispose();
         parking.Dispose(); // puts every parked window back on screen
         msg.DestroyHandle();
