@@ -100,6 +100,43 @@ internal sealed class SpaceSwitcher(WindowTracker tracker, SlideOverlay overlay,
         timer.Start();
     }
 
+    /// <summary>Reorder a monitor's spaces (from dragging cards in the overview).</summary>
+    public void Reorder(MonitorDesc mon, IEnumerable<IntPtr> order)
+    {
+        tracker.SetOrder(mon.Device, order);
+        Log.Write($"{mon.Device}: spaces reordered");
+    }
+
+    /// <summary>Move a full-screen app to another monitor, keeping it maximized / full screen. It becomes that monitor's last space.</summary>
+    public void MoveToMonitor(IntPtr h, MonitorDesc target)
+    {
+        try
+        {
+            parking.Unpark(h);
+            if (IsZoomed(h))
+            {
+                // Re-home its restored position on the target monitor and maximize it there in one step.
+                var wp = new WINDOWPLACEMENT { length = System.Runtime.InteropServices.Marshal.SizeOf<WINDOWPLACEMENT>() };
+                GetWindowPlacement(h, ref wp);
+                var n = wp.rcNormalPosition;
+                int w = Math.Min(n.Width, target.Work.Width), hh = Math.Min(n.Height, target.Work.Height);
+                int x = target.Work.Left + (target.Work.Width - w) / 2, y = target.Work.Top + (target.Work.Height - hh) / 2;
+                wp.rcNormalPosition = new RECT { Left = x, Top = y, Right = x + w, Bottom = y + hh };
+                wp.showCmd = SW_SHOWMAXIMIZED;
+                wp.flags = 0;
+                SetWindowPlacement(h, ref wp);
+            }
+            else
+            {
+                var b = target.Bounds; // borderless full screen: cover the whole target monitor
+                SetWindowPos(h, IntPtr.Zero, b.Left, b.Top, b.Width, b.Height, SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            SetWindowPos(h, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); // on top over there
+            Log.Write($"moved {h} to {target.Device}");
+        }
+        catch (Exception ex) { Log.Write("move to monitor failed: " + ex.Message); }
+    }
+
     /// <summary>Switch a monitor straight to one of its spaces (used by the overview; no slide).</summary>
     public void ActivateSpace(MonitorDesc mon, IntPtr target)
     {

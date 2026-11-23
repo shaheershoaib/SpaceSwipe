@@ -410,6 +410,8 @@ internal sealed class TrayContext : ApplicationContext
             var mon = s.Mon;
             var form = new OverviewForm(mon, s.Spaces, () => switcher.CaptureDesktop(mon));
             form.Chosen += h => switcher.ActivateSpace(mon, h);
+            form.Reordered += order => switcher.Reorder(mon, order);
+            form.MoveRequested += (h, target) => switcher.MoveToMonitor(h, target);
             form.FormClosed += (_, _) => { if (overview == form) overview = null; form.Dispose(); };
             overview = form;
             Log.Write($"{mon.Device}: overview with {s.Spaces.Count} space(s)");

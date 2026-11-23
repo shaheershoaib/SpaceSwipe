@@ -125,6 +125,14 @@ internal sealed class WindowTracker
         return list;
     }
 
+    /// <summary>Put a monitor's spaces in this order (anything not listed, e.g. on another desktop, keeps its place at the end).</summary>
+    public void SetOrder(string device, IEnumerable<IntPtr> order)
+    {
+        var list = order.ToList();
+        if (rings.TryGetValue(device, out var ring)) list.AddRange(ring.Where(h => !list.Contains(h)));
+        rings[device] = list;
+    }
+
     public IReadOnlyList<IntPtr> Ring(string device) =>
         rings.TryGetValue(device, out var r) ? r : Array.Empty<IntPtr>();
 

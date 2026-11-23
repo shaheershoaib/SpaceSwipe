@@ -17,6 +17,15 @@ internal sealed class SetupForm : Form
         Text = "In Settings: Bluetooth & devices → Touchpad → Three-finger gestures → set Swipes to \"Nothing\".",
     };
     readonly Button openSettings = new() { Text = "Open touchpad settings", AutoSize = true, Margin = new Padding(24, 0, 0, 12) };
+    readonly Label desktopStatus = Status();
+    readonly Label desktopHelp = new()
+    {
+        AutoSize = true,
+        MaximumSize = new Size(520, 0),
+        ForeColor = SystemColors.GrayText,
+        Margin = new Padding(24, 0, 0, 4),
+    };
+    readonly Button mergeDesktops = new() { Text = "Merge into one desktop", AutoSize = true, Margin = new Padding(24, 0, 0, 12) };
     readonly CheckBox startup = new() { Text = "Start SpaceSwipe when I sign in", AutoSize = true, Checked = true, Margin = new Padding(0, 4, 0, 12) };
     readonly System.Windows.Forms.Timer refresh = new() { Interval = 1000 };
 
@@ -72,6 +81,20 @@ internal sealed class SetupForm : Form
         openSettings.Click += (_, _) => OpenUrl("ms-settings:devices-touchpad");
         layout.Controls.Add(openSettings);
 
+        layout.Controls.Add(desktopStatus);
+        layout.Controls.Add(desktopHelp);
+        mergeDesktops.Click += (_, _) =>
+        {
+            mergeDesktops.Enabled = false;
+            UseWaitCursor = true;
+            SystemCheck.MergeVirtualDesktops();
+            UseWaitCursor = false;
+            mergeDesktops.Enabled = true;
+            Activate();
+            UpdateStatus();
+        };
+        layout.Controls.Add(mergeDesktops);
+
         layout.Controls.Add(startup);
 
         layout.Controls.Add(new Label
@@ -114,6 +137,19 @@ internal sealed class SetupForm : Form
         swipeStatus.ForeColor = off ? Color.SeaGreen : Color.DarkOrange;
         swipeHelp.Visible = !off;
         openSettings.Visible = !off;
+
+        // SpaceSwipe gives each monitor its own spaces, so Windows' all-monitor virtual desktops just get in the way.
+        int desktops = SystemCheck.VirtualDesktopCount();
+        bool fourOff = SystemCheck.WindowsFourFingerSwipesOff();
+        bool desktopsOk = desktops <= 1 && fourOff;
+        desktopStatus.Text = desktopsOk ? "✔  One Windows desktop, no desktop-switching swipes"
+                                        : "➜  Turn off Windows' virtual desktops (optional, recommended)";
+        desktopStatus.ForeColor = desktopsOk ? Color.SeaGreen : Color.DarkOrange;
+        desktopHelp.Text = (desktops > 1 ? $"You have {desktops} Windows desktops; apps on the others are hidden from SpaceSwipe. " : "") +
+                           (fourOff ? "" : "Also set Touchpad → Four-finger gestures → Swipes to \"Nothing\" so you don't switch desktops by accident.");
+        desktopHelp.Visible = !desktopsOk;
+        mergeDesktops.Visible = desktops > 1;
+        if (!fourOff) openSettings.Visible = true;
     }
 
     static void OpenUrl(string url)

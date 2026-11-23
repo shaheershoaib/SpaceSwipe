@@ -20,7 +20,9 @@ internal sealed class OverviewForm : Form
         public Icon? Icon;
         public IntPtr Thumb;
         public Rectangle Crop;      // visible part of the source window (empty = whole window)
-        public Rectangle Rect;      // position when fully open (client coordinates)
+        public Rectangle Rect;      // where it's drawn when open (glides towards Home while cards are rearranged)
+        public Rectangle Home;      // its slot in the layout
+        public bool IsCurrent;
         public Shot? Image;         // desktop card
         public Shot? Snap;          // exact screenshot used while this card is the one zooming (no live-preview blip)
     }
@@ -31,11 +33,27 @@ internal sealed class OverviewForm : Form
 
     readonly MonitorDesc mon;
     readonly List<Card> cards = new();
-    readonly Shot clean;            // the monitor as it looked when the overview started
+    Shot clean;                     // the monitor as it looked when the overview started (refreshed after changes)
+    readonly System.Windows.Forms.Timer glideTimer = new() { Interval = 10 };
+    int pressIndex = -1, dragIndex = -1;
+    Point pressPos, dragOffset, cursor;
+    MonitorDesc? dropMonitor;
+    string? lastDropLogged = "";
+    enum Side { Top, Right, Bottom, Left }
+    double bannerAnim;              // 0 = hidden, 1 = shown (eases towards the target each frame)
+    string bannerText = "";
+    Side bannerSide;
+    bool screenChanged;             // an app was moved away, so the snapshot of the screen is stale
+
+    /// <summary>The user reordered the app cards (new order of app windows, Desktop excluded).</summary>
+    public event Action<List<IntPtr>>? Reordered;
+    /// <summary>The user dragged an app card onto another monitor.</summary>
+    public event Action<IntPtr, MonitorDesc>? MoveRequested;
+
+    int CurrentIndex => cards.FindIndex(c => c.IsCurrent);
     readonly Shot black = Shot.Blank(1, 1);
     readonly Task<Shot> blurTask;   // blurred + dimmed backdrop, made in the background
     readonly IntPtr priorForeground;
-    readonly int currentIndex;
     readonly Func<Shot?>? captureDesktop;
     bool needDesktopCapture;
     Shot? back;
@@ -77,7 +95,7 @@ internal sealed class OverviewForm : Form
 
         foreach (var s in spaces)
         {
-            var card = new Card { Item = s };
+            var card = new Card { Item = s, IsCurrent = s.Current };
             if (s.Hwnd == IntPtr.Zero)
             {
                 card.Label = "Desktop";
@@ -106,12 +124,13 @@ internal sealed class OverviewForm : Form
             }
             cards.Add(card);
         }
-        currentIndex = Math.Max(0, cards.FindIndex(c => c.Item.Current));
-        selected = focusIndex = currentIndex;
+        int ci = Math.Max(0, CurrentIndex);
+        selected = focusIndex = ci;
+        glideTimer.Tick += (_, _) => Glide();
 
         // The current app shrinks from (and grows back to) exactly what is on screen: use the screenshot.
-        if (cards.Count > 0 && cards[currentIndex].Item.Hwnd != IntPtr.Zero)
-            cards[currentIndex].Snap = Crop(clean, FullRectFor(cards[currentIndex].Item.Kind));
+        if (cards.Count > 0 && cards[ci].Item.Hwnd != IntPtr.Zero)
+            cards[ci].Snap = Crop(clean, FullRectFor(cards[ci].Item.Kind));
     }
 
     static Shot Crop(Shot src, Rectangle r)
@@ -165,7 +184,7 @@ internal sealed class OverviewForm : Form
     public void BeginOpen()
     {
         state = State.Opening;
-        focusIndex = currentIndex;
+        focusIndex = CurrentIndex;
         progress = 0;
 
         // Keep the window off the screen (cloaked) until its first frame is painted, so it can't flash.
@@ -232,7 +251,7 @@ internal sealed class OverviewForm : Form
     public void DragClose(double t)
     {
         if (state != State.Open) return;
-        focusIndex = currentIndex;
+        focusIndex = CurrentIndex;
         progress = 1 - Math.Clamp(t, 0, 1);
         Render(progress, false);
     }
@@ -269,9 +288,20 @@ internal sealed class OverviewForm : Form
             Left = full.Left + mon.Bounds.Left, Top = full.Top + mon.Bounds.Top,
             Right = full.Right + mon.Bounds.Left, Bottom = full.Bottom + mon.Bounds.Top,
         });
+        RefreshScreen(); // the background fades to the real result, not the old screen
 
+        glideTimer.Stop();
+        foreach (var x in cards) x.Rect = x.Home;
         AnimateTo(0);
         Close();
+    }
+
+    /// <summary>Re-photograph the real screen underneath (this window is excluded from capture).</summary>
+    void RefreshScreen()
+    {
+        var fresh = Shot.Capture(mon.Bounds);
+        clean.Dispose();
+        clean = fresh;
     }
 
     /// <summary>Close without switching: the current space grows back to full screen.</summary>
@@ -280,8 +310,18 @@ internal sealed class OverviewForm : Form
         if (state == State.Closing) return;
         bool wasOpen = state == State.Open;
         state = State.Closing;
-        focusIndex = currentIndex;
-        if (wasOpen && priorForeground != IntPtr.Zero) SpaceSwitcher.Focus(priorForeground);
+        glideTimer.Stop();
+        if (dragIndex >= 0) { dragIndex = -1; dropMonitor = null; }
+        foreach (var x in cards) x.Rect = x.Home;
+        if (screenChanged)
+        {
+            // An app was moved to another display: fade back to the real screen as it is now.
+            DwmFlush();
+            RefreshScreen();
+            focusIndex = -1;
+        }
+        else focusIndex = CurrentIndex;
+        if (wasOpen && priorForeground != IntPtr.Zero && IsWindow(priorForeground)) SpaceSwitcher.Focus(priorForeground);
         AnimateTo(0);
         Close();
     }
@@ -315,10 +355,23 @@ internal sealed class OverviewForm : Form
     Rectangle FullRectFor(WinKind kind) =>
         kind == WinKind.FullScreen ? new Rectangle(0, 0, mon.Bounds.Width, mon.Bounds.Height) : WorkInClient();
 
-    void LayoutCards()
+    /// <summary>Lay the cards out in their current order. snap = jump there; otherwise they glide.</summary>
+    void LayoutCards(bool snap = true)
     {
-        int n = cards.Count;
-        if (n == 0) return;
+        var slots = Slots(cards.Count);
+        for (int i = 0; i < cards.Count; i++)
+        {
+            cards[i].Home = slots[i];
+            if (snap) cards[i].Rect = slots[i];
+        }
+        if (!snap) glideTimer.Start();
+    }
+
+    /// <summary>Card positions for n cards, centred in rows.</summary>
+    List<Rectangle> Slots(int n)
+    {
+        var result = new List<Rectangle>(n);
+        if (n == 0) return result;
         double w = ClientSize.Width, h = ClientSize.Height;
         double aspect = (double)mon.Work.Width / mon.Work.Height;
         double labelH = 40 * scale, gap = 40 * scale;
@@ -343,8 +396,199 @@ internal sealed class OverviewForm : Form
             double rowW = k * bestW + (k - 1) * gap;
             double left = (w - rowW) / 2;
             for (int j = 0; j < k; j++, i++)
-                cards[i].Rect = new Rectangle((int)(left + j * (bestW + gap)), (int)(top + r * (ch + labelH + gap)), (int)bestW, (int)ch);
+                result.Add(new Rectangle((int)(left + j * (bestW + gap)), (int)(top + r * (ch + labelH + gap)), (int)bestW, (int)ch));
         }
+        return result;
+    }
+
+    // ---------------- dragging cards (reorder, or move to another monitor) ----------------
+
+    /// <summary>Animate cards towards their slots; the dragged card follows the cursor.</summary>
+    void Glide()
+    {
+        bool moving = dragIndex >= 0;
+
+        double bannerTarget = dragIndex >= 0 && dropMonitor != null ? 1 : 0;
+        if (Math.Abs(bannerTarget - bannerAnim) > 0.005)
+        {
+            bannerAnim += (bannerTarget - bannerAnim) * 0.2;
+            moving = true;
+        }
+        else bannerAnim = bannerTarget;
+
+        for (int i = 0; i < cards.Count; i++)
+        {
+            var c = cards[i];
+            if (i == dragIndex) { c.Rect = DraggedRect(c); continue; }
+            var r = c.Rect;
+            var target = c.Home;
+            var next = new Rectangle(
+                Step(r.Left, target.Left), Step(r.Top, target.Top), Step(r.Width, target.Width), Step(r.Height, target.Height));
+            if (next != r) moving = true;
+            c.Rect = next;
+        }
+        Render(1, true);
+        if (!moving) glideTimer.Stop();
+    }
+
+    static int Step(int from, int to)
+    {
+        int d = to - from;
+        if (Math.Abs(d) <= 1) return to;
+        return from + (int)Math.Round(d * 0.28);
+    }
+
+    /// <summary>The dragged card: slightly enlarged under the cursor, kept on this monitor.</summary>
+    Rectangle DraggedRect(Card c)
+    {
+        // Lifted slightly while dragging; shrinks a little over a drop zone ("this will move away").
+        double s = 1.06 - 0.24 * EaseOut(Math.Clamp(bannerAnim, 0, 1));
+        int w = (int)(c.Home.Width * s), h = (int)(c.Home.Height * s);
+        int x = Math.Clamp(cursor.X - (int)(dragOffset.X * s), 0, Math.Max(0, ClientSize.Width - w));
+        int y = Math.Clamp(cursor.Y - (int)(dragOffset.Y * s), 0, Math.Max(0, ClientSize.Height - h));
+        return new Rectangle(x, y, w, h);
+    }
+
+    void StartDrag(int i)
+    {
+        Log.Write($"overview: start dragging card {i} ({cards[i].Label})");
+        lastDropLogged = "";
+        dragIndex = i;
+        var c = cards[i];
+        dragOffset = new Point(pressPos.X - c.Home.Left, pressPos.Y - c.Home.Top);
+        // Re-register its live preview so it draws above the other cards.
+        if (c.Thumb != IntPtr.Zero)
+        {
+            DwmUnregisterThumbnail(c.Thumb);
+            c.Thumb = IntPtr.Zero;
+            if (DwmRegisterThumbnail(Handle, c.Item.Hwnd, out var t) == 0) c.Thumb = t;
+        }
+        glideTimer.Start();
+    }
+
+    void UpdateDrag(Point clientPos)
+    {
+        cursor = clientPos;
+        var screen = new Point(clientPos.X + mon.Bounds.Left, clientPos.Y + mon.Bounds.Top);
+        var b = new Rectangle(mon.Bounds.Left, mon.Bounds.Top, mon.Bounds.Width, mon.Bounds.Height);
+        dropMonitor = null;
+        if (!b.Contains(screen))
+        {
+            var other = WindowTracker.GetMonitor(MonitorFromPoint(new POINT { X = screen.X, Y = screen.Y }, MONITOR_DEFAULTTONEAREST));
+            if (other.Device != mon.Device) dropMonitor = other;
+        }
+        else if (dragIndex >= 0)
+        {
+            // When the dragged card itself reaches an edge with another monitor beyond it, that edge is a drop zone.
+            // (Measured from the card, not the cursor: you grab a card near its middle, and the card hits the
+            // edge long before the cursor does.)
+            var home = cards[dragIndex].Home;
+            int cardW = (int)(home.Width * 1.06), cardH = (int)(home.Height * 1.06);
+            var card = new Rectangle(clientPos.X - (int)(dragOffset.X * 1.06), clientPos.Y - (int)(dragOffset.Y * 1.06), cardW, cardH);
+            int zone = (int)(24 * scale);
+            var cs = ClientSize;
+            int cx = Math.Clamp(screen.X, b.Left, b.Right - 1), cy = Math.Clamp(screen.Y, b.Top, b.Bottom - 1);
+            POINT? beyond =
+                card.Right >= cs.Width - zone ? new POINT { X = b.Right + 2, Y = cy } :
+                card.Left <= zone ? new POINT { X = b.Left - 3, Y = cy } :
+                card.Bottom >= cs.Height - zone ? new POINT { X = cx, Y = b.Bottom + 2 } :
+                card.Top <= zone ? new POINT { X = cx, Y = b.Top - 3 } : null;
+            if (beyond is { } pt)
+            {
+                var h = MonitorFromPoint(pt, 0 /* MONITOR_DEFAULTTONULL */);
+                if (h != IntPtr.Zero)
+                {
+                    var other = WindowTracker.GetMonitor(h);
+                    if (other.Device != mon.Device) dropMonitor = other;
+                }
+            }
+        }
+
+        if (dropMonitor is { } t)
+        {
+            bannerSide =
+                t.Bounds.Left >= mon.Bounds.Right ? Side.Right :
+                t.Bounds.Right <= mon.Bounds.Left ? Side.Left :
+                t.Bounds.Top >= mon.Bounds.Bottom ? Side.Bottom : Side.Top;
+            bannerText = bannerSide switch
+            {
+                Side.Right => "Move to the display on the right  →",
+                Side.Left => "←  Move to the display on the left",
+                Side.Bottom => "Move to the display below  ↓",
+                _ => "Move to the display above  ↑",
+            };
+        }
+
+        if (dropMonitor?.Device != lastDropLogged)
+        {
+            lastDropLogged = dropMonitor?.Device;
+            Log.Write($"overview drag at screen ({screen.X},{screen.Y}) client ({clientPos.X},{clientPos.Y}) on {mon.Device} {b}: drop target = {dropMonitor?.Device ?? "none"}");
+        }
+
+        // Reorder: put the dragged card in the slot nearest the cursor (the Desktop always stays first).
+        if (dropMonitor == null && cards.Count > 2)
+        {
+            var slots = Slots(cards.Count);
+            int best = 1;
+            double bestD = double.MaxValue;
+            for (int s = 1; s < slots.Count; s++)
+            {
+                var sc = new Point(slots[s].Left + slots[s].Width / 2, slots[s].Top + slots[s].Height / 2);
+                double d = Math.Pow(sc.X - cursor.X, 2) + Math.Pow(sc.Y - cursor.Y, 2);
+                if (d < bestD) { bestD = d; best = s; }
+            }
+            if (best != dragIndex)
+            {
+                var c = cards[dragIndex];
+                cards.RemoveAt(dragIndex);
+                cards.Insert(best, c);
+                dragIndex = best;
+                selected = best;
+                focusIndex = CurrentIndex;
+                LayoutCards(snap: false);
+            }
+        }
+        glideTimer.Start();
+    }
+
+    void EndDrag()
+    {
+        int i = dragIndex;
+        dragIndex = -1;
+        if (i < 0) return;
+        var c = cards[i];
+        Log.Write($"overview: dropped card {i} ({c.Label}) -> {(dropMonitor != null ? "move to " + dropMonitor.Device : "reorder")}");
+        if (dropMonitor is { } target)
+        {
+            MoveRequested?.Invoke(c.Item.Hwnd, target);
+            SpaceSwitcher.Focus(Handle); // maximizing it over there took focus; keep the overview open
+            if (c.Thumb != IntPtr.Zero) DwmUnregisterThumbnail(c.Thumb);
+            c.Image?.Dispose();
+            c.Snap?.Dispose();
+            cards.RemoveAt(i);
+            screenChanged = true;
+            selected = Math.Clamp(selected, 0, cards.Count - 1);
+            hover = -1;
+        }
+        else
+        {
+            Reordered?.Invoke(cards.Where(x => x.Item.Hwnd != IntPtr.Zero).Select(x => x.Item.Hwnd).ToList());
+        }
+        dropMonitor = null;
+        focusIndex = CurrentIndex;
+        LayoutCards(snap: false);
+    }
+
+    /// <summary>Ctrl+←/→: move the selected app card one place.</summary>
+    void MoveSelected(int delta)
+    {
+        int to = selected + delta;
+        if (selected < 1 || to < 1 || to >= cards.Count) return;
+        (cards[selected], cards[to]) = (cards[to], cards[selected]);
+        selected = to;
+        focusIndex = CurrentIndex;
+        LayoutCards(snap: false);
+        Reordered?.Invoke(cards.Where(x => x.Item.Hwnd != IntPtr.Zero).Select(x => x.Item.Hwnd).ToList());
     }
 
     /// <summary>Where card i is at progress p: the focused card travels between full screen and its slot; others scale in.</summary>
@@ -423,7 +667,7 @@ internal sealed class OverviewForm : Form
             var r = RectAt(i, p);
             byte a = AlphaAt(i, p);
             if (a == 0 || r.Width <= 0 || r.Height <= 0) continue;
-            if (i == focusIndex && c.Snap != null)
+            if (i == focusIndex && c.Snap != null && i != dragIndex)
             {
                 StretchBlt(back.Dc, r.Left, r.Top, r.Width, r.Height, c.Snap.Dc, 0, 0, c.Snap.W, c.Snap.H, SRCCOPY);
                 continue;
@@ -480,10 +724,77 @@ internal sealed class OverviewForm : Form
             TextRenderer.DrawText(g, c.Label, font, new Rectangle(x, labelRect.Top, r.Right - x, labelRect.Height), Color.White, flags);
         }
 
+        DrawDropBanner(g);
+
         using var hint = new Font("Segoe UI", 9.5f * scale, GraphicsUnit.Point);
         var hr = new Rectangle(0, ClientSize.Height - (int)(56 * scale), ClientSize.Width, (int)(30 * scale));
-        TextRenderer.DrawText(g, "Click an app  ·  ← → and Enter  ·  Esc or swipe down to close", hint, hr,
+        string text = dragIndex >= 0
+            ? "Drop to reorder  ·  drag onto another display to move the app there"
+            : "Click an app  ·  drag to reorder or onto another display  ·  Esc or swipe down to close";
+        TextRenderer.DrawText(g, text, hint, hr,
             Color.FromArgb(190, 255, 255, 255), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+    }
+
+    /// <summary>
+    /// "Move to another display" feedback: a frosted pill that slides down from the top, plus a soft glow on the
+    /// edge you're heading for. Neutral (no accent colour), and it eases in and out with <see cref="bannerAnim"/>.
+    /// </summary>
+    void DrawDropBanner(Graphics g)
+    {
+        double e = EaseOut(Math.Clamp(bannerAnim, 0, 1));
+        if (e < 0.01 || bannerText.Length == 0) return;
+        var cs = ClientSize;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+
+        // Edge glow.
+        int gw = (int)(120 * scale);
+        Rectangle glow = bannerSide switch
+        {
+            Side.Right => new Rectangle(cs.Width - gw, 0, gw, cs.Height),
+            Side.Left => new Rectangle(0, 0, gw, cs.Height),
+            Side.Bottom => new Rectangle(0, cs.Height - gw, cs.Width, gw),
+            _ => new Rectangle(0, 0, cs.Width, gw),
+        };
+        var (from, to) = bannerSide switch
+        {
+            Side.Right => (new Point(glow.Left, 0), new Point(glow.Right, 0)),
+            Side.Left => (new Point(glow.Right, 0), new Point(glow.Left, 0)),
+            Side.Bottom => (new Point(0, glow.Top), new Point(0, glow.Bottom)),
+            _ => (new Point(0, glow.Bottom), new Point(0, glow.Top)),
+        };
+        using (var glowBrush = new LinearGradientBrush(from, to, Color.FromArgb(0, 255, 255, 255), Color.FromArgb((int)(70 * e), 255, 255, 255)))
+            g.FillRectangle(glowBrush, glow);
+
+        // Frosted pill, sliding down from above the top edge.
+        using var font = new Font("Segoe UI Semibold", 12f * scale, GraphicsUnit.Point);
+        var size = g.MeasureString(bannerText, font);
+        int padX = (int)(26 * scale), padY = (int)(12 * scale);
+        int w = (int)size.Width + padX * 2, h = (int)size.Height + padY * 2;
+        int restY = (int)(32 * scale);
+        int y = (int)(-h + (restY + h) * e);
+        var pill = new Rectangle((cs.Width - w) / 2, y, w, h);
+        using (var shadow = new SolidBrush(Color.FromArgb((int)(60 * e), 0, 0, 0)))
+            FillRounded(g, shadow, new Rectangle(pill.X, pill.Y + (int)(4 * scale), pill.Width, pill.Height), h / 2f);
+        using (var fill = new SolidBrush(Color.FromArgb((int)(58 * e), 255, 255, 255)))
+            FillRounded(g, fill, pill, h / 2f);
+        using (var path = Rounded(pill, h / 2f))
+        using (var border = new Pen(Color.FromArgb((int)(110 * e), 255, 255, 255), 1.2f * scale))
+            g.DrawPath(border, path);
+        using var text = new SolidBrush(Color.FromArgb((int)(245 * e), 255, 255, 255));
+        g.DrawString(bannerText, font, text, pill.X + padX, pill.Y + padY);
+    }
+
+    static GraphicsPath Rounded(Rectangle r, float radius)
+    {
+        var path = new GraphicsPath();
+        float d = Math.Min(radius * 2, Math.Min(r.Width, r.Height));
+        path.AddArc(r.X, r.Y, d, d, 180, 90);
+        path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        path.CloseFigure();
+        return path;
     }
 
     void UpdateThumbs(double p)
@@ -495,7 +806,7 @@ internal sealed class OverviewForm : Form
             var r = RectAt(i, p);
             byte a = AlphaAt(i, p);
             var props = new DWM_THUMBNAIL_PROPERTIES();
-            if (a == 0 || r.Width <= 0 || r.Height <= 0 || (i == focusIndex && c.Snap != null))
+            if (a == 0 || r.Width <= 0 || r.Height <= 0 || (i == focusIndex && c.Snap != null && i != dragIndex))
             {
                 props.dwFlags = DWM_TNP_VISIBLE;
                 props.fVisible = 0;
@@ -546,16 +857,32 @@ internal sealed class OverviewForm : Form
     {
         for (int i = 0; i < cards.Count; i++)
         {
-            var r = cards[i].Rect;
+            var r = cards[i].Home;
             if (new Rectangle(r.Left, r.Top, r.Width, r.Height + (int)(40 * scale)).Contains(p)) return i;
         }
         return -1;
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        if (state != State.Open || e.Button != MouseButtons.Left) return;
+        pressIndex = HitTest(e.Location);
+        pressPos = e.Location;
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
         if (state != State.Open) return;
+        if (dragIndex >= 0) { UpdateDrag(e.Location); return; }
+        if (pressIndex >= 1 && e.Button == MouseButtons.Left && cards[pressIndex].Item.Hwnd != IntPtr.Zero &&
+            Math.Abs(e.X - pressPos.X) + Math.Abs(e.Y - pressPos.Y) > 10 * scale)
+        {
+            StartDrag(pressIndex);
+            UpdateDrag(e.Location);
+            return;
+        }
         int h = HitTest(e.Location);
         if (h != hover) { hover = h; if (h >= 0) selected = h; Invalidate(); }
     }
@@ -564,8 +891,12 @@ internal sealed class OverviewForm : Form
     {
         base.OnMouseUp(e);
         if (state != State.Open || e.Button != MouseButtons.Left) return;
+        int pressed = pressIndex;
+        pressIndex = -1;
+        if (dragIndex >= 0) { EndDrag(); return; }
         int i = HitTest(e.Location);
-        if (i >= 0) Choose(i); else Dismiss();
+        if (i >= 0 && i == pressed) Choose(i);
+        else if (i < 0 && pressed < 0) Dismiss();
     }
 
     protected override void OnKeyDown(KeyEventArgs e)
@@ -577,6 +908,8 @@ internal sealed class OverviewForm : Form
         {
             case Keys.Escape: Dismiss(); break;
             case Keys.Enter or Keys.Space: Choose(selected); break;
+            case Keys.Left when e.Control: MoveSelected(-1); break;
+            case Keys.Right when e.Control: MoveSelected(+1); break;
             case Keys.Left: selected = (selected - 1 + n) % n; Invalidate(); break;
             case Keys.Right or Keys.Tab: selected = (selected + 1) % n; Invalidate(); break;
             case Keys.Up: if (selected - cols >= 0) { selected -= cols; Invalidate(); } break;
@@ -588,11 +921,15 @@ internal sealed class OverviewForm : Form
     protected override void OnDeactivate(EventArgs e)
     {
         base.OnDeactivate(e);
-        if (state == State.Open) BeginInvoke(Dismiss); // clicked another monitor, Alt+Tab, etc.
+        // Clicked another monitor, Alt+Tab, etc. (but not our own refocus right after moving an app).
+        if (state == State.Open)
+            BeginInvoke(() => { if (state == State.Open && GetForegroundWindow() != Handle) Dismiss(); });
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
+        glideTimer.Stop();
+        glideTimer.Dispose();
         foreach (var c in cards)
         {
             if (c.Thumb != IntPtr.Zero) DwmUnregisterThumbnail(c.Thumb);

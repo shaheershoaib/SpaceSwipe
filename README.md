@@ -12,6 +12,7 @@ when you let go. Your other monitors stay where they are.
 - 🖐️ **Finger-tracked**: the slide follows your fingers. A flick or a drag past about 30% switches, anything less springs back.
 - 🖥️ **Per monitor**: like macOS with *"Displays have separate Spaces"* turned on. Windows' own virtual desktops switch every monitor at once.
 - 🪟 **Overview, like Mission Control**: swipe up with three fingers and the current app shrinks, following your fingers, into a row of live cards with every space on that monitor. Click one to zoom into it.
+- ↔️ **Rearrange spaces**: drag cards in the overview to reorder them, or drag a card to a screen edge to send that app to another display.
 - 🏠 **Desktop space**: the first space on each monitor is its desktop with your normal windows. Three-finger swipe down jumps straight to it.
 - ⌨️ **Alt+Tab still works**, and so do the taskbar and Win+Tab.
 - 🪶 **Small and self-contained**: one exe, no admin rights, no .NET install needed. It runs from the tray.
@@ -26,6 +27,10 @@ when you let go. Your other monitors stay where they are.
      USB-C and Lightning models, wired or over Bluetooth.
    - **Windows' own three-finger swipes are off.** Click *Open touchpad settings* and set
      *Three-finger gestures → Swipes* to **Nothing**, so Windows and SpaceSwipe don't both react.
+   - **Optional: Windows virtual desktops.** SpaceSwipe gives each monitor its own spaces, so Windows' all-monitor
+     desktops only get in the way, and apps on other desktops are hidden from SpaceSwipe. If you have several,
+     *Merge into one desktop* moves every app onto one without closing anything. Setting *Four-finger gestures →
+     Swipes* to **Nothing** stops you from switching desktops by accident.
 3. Click **Install and start**. SpaceSwipe installs to `%LOCALAPPDATA%\Programs\SpaceSwipe`, adds a Start menu entry,
    and (optionally) starts when you sign in.
 
@@ -39,6 +44,7 @@ when you let go. Your other monitors stay where they are.
 | Three-finger drag left / right | Slide to the next / previous full-screen app **on the monitor under the cursor** |
 | Three-finger drag up | That monitor's overview: its spaces as live cards (follows your fingers; let go to open) |
 | In the overview | Click a card, or `←` `→` + `Enter`, to switch. `Esc`, a click on the background, or a three-finger swipe down closes it |
+| Drag a card in the overview | Reorder that monitor's spaces (`Ctrl` + `←` / `→` does the same). Drag it to the edge facing another display and let go to move the app there |
 | Three-finger swipe down | That monitor's desktop space |
 | `Ctrl` + `Alt` + `Win` + `←` / `→` / `↑` / `↓` | The same from the keyboard |
 

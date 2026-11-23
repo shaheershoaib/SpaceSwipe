@@ -139,6 +139,36 @@ internal static class SystemCheck
         return false;
     }
 
+    /// <summary>How many Windows virtual desktops exist (SpaceSwipe replaces them, and apps on other desktops are hidden from it).</summary>
+    public static int VirtualDesktopCount()
+    {
+        using var k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops");
+        return k?.GetValue("VirtualDesktopIDs") is byte[] ids && ids.Length >= 16 ? ids.Length / 16 : 1;
+    }
+
+    /// <summary>
+    /// Close extra virtual desktops (Win+Ctrl+F4) until one is left. Windows on a closed desktop move to the
+    /// neighbouring one, so no app is closed.
+    /// </summary>
+    public static void MergeVirtualDesktops()
+    {
+        const uint VK_CONTROL = 0x11, VK_F4 = 0x73;
+        for (int i = 0; i < 30 && VirtualDesktopCount() > 1; i++)
+        {
+            Native.Send(Native.Key(Native.VK_LWIN, false), Native.Key(VK_CONTROL, false), Native.Key(VK_F4, false),
+                        Native.Key(VK_F4, true), Native.Key(VK_CONTROL, true), Native.Key(Native.VK_LWIN, true));
+            Thread.Sleep(600);
+        }
+        Log.Write($"merged virtual desktops; now {VirtualDesktopCount()}");
+    }
+
+    /// <summary>Windows' four-finger swipes switch virtual desktops by default (missing value = default).</summary>
+    public static bool WindowsFourFingerSwipesOff()
+    {
+        using var k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\PrecisionTouchPad");
+        return k?.GetValue("FourFingerSlideEnabled") is int v && v == 0;
+    }
+
     /// <summary>
     /// Windows' own three-finger swipe action (0 = Nothing). Missing means the default, "Switch apps".
     /// Only the Settings app applies a change immediately, so we just read it.
