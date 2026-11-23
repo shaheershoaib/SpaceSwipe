@@ -17,9 +17,9 @@ jobs:
       matrix:
         rid: [win-x64, win-arm64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 9.0.x
 
@@ -32,7 +32,7 @@ jobs:
           $name = if ('${{ matrix.rid }}' -eq 'win-arm64') { 'SpaceSwipe-arm64.exe' } else { 'SpaceSwipe.exe' }
           Move-Item out/SpaceSwipe.exe $name
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: SpaceSwipe-${{ matrix.rid }}
           path: SpaceSwipe*.exe
@@ -42,12 +42,12 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*.exe
           generate_release_notes: true
