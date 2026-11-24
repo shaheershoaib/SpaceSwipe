@@ -26,6 +26,37 @@ internal sealed class WindowTracker
     /// <summary>Windows hidden below the screen for a Desktop space still belong to their monitor's row.</summary>
     public Parking? Parking { get; set; }
 
+    /// <summary>User preferences (borderless full screen, excluded apps).</summary>
+    public Settings? Settings { get; set; }
+
+    readonly Dictionary<uint, string> processNames = new();
+
+    /// <summary>Lower-case executable name of the window's process ("firefox.exe"), cached per process.</summary>
+    public string ProcessName(IntPtr h)
+    {
+        GetWindowThreadProcessId(h, out uint pid);
+        if (processNames.TryGetValue(pid, out var name)) return name;
+        name = "";
+        try
+        {
+            using var p = System.Diagnostics.Process.GetProcessById((int)pid);
+            name = (p.ProcessName + ".exe").ToLowerInvariant();
+        }
+        catch { /* gone or protected */ }
+        if (processNames.Count > 500) processNames.Clear();
+        processNames[pid] = name;
+        return name;
+    }
+
+    bool Excluded(IntPtr h)
+    {
+        var list = Settings?.ExcludedApps;
+        if (list == null || list.Count == 0) return false;
+        var name = ProcessName(h);
+        return name.Length > 0 && list.Any(x => string.Equals(x.Trim(), name, StringComparison.OrdinalIgnoreCase) ||
+                                                string.Equals(x.Trim() + ".exe", name, StringComparison.OrdinalIgnoreCase));
+    }
+
     static readonly HashSet<string> ShellClasses = new(StringComparer.OrdinalIgnoreCase)
     {
         "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Windows.UI.Core.CoreWindow",
@@ -72,6 +103,7 @@ internal sealed class WindowTracker
 
         // Minimized windows are not spaces (same as macOS).
         if (IsIconic(h)) return WinKind.None;
+        if (Excluded(h)) return WinKind.None;
 
         if (Parking?.MonitorOf(h) is { } parkedOn)
         {
@@ -86,7 +118,8 @@ internal sealed class WindowTracker
 
         GetWindowRect(h, out var wr);
         var b = md.Bounds;
-        if (wr.Left <= b.Left && wr.Top <= b.Top && wr.Right >= b.Right && wr.Bottom >= b.Bottom)
+        if ((Settings?.IncludeBorderlessFullScreen ?? true) &&
+            wr.Left <= b.Left && wr.Top <= b.Top && wr.Right >= b.Right && wr.Bottom >= b.Bottom)
             return WinKind.FullScreen; // borderless full screen (F11 browsers, games, video players)
         return WinKind.None;
     }

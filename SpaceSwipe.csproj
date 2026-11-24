@@ -10,7 +10,7 @@
     <ApplicationIcon>assets\SpaceSwipe.ico</ApplicationIcon>
     <AssemblyName>SpaceSwipe</AssemblyName>
     <RootNamespace>SpaceSwipe</RootNamespace>
-    <Version>1.2.1</Version>
+    <Version>1.3.0</Version>
     <Product>SpaceSwipe</Product>
     <Description>macOS-style three-finger swipes between full-screen apps, per monitor, for Windows.</Description>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>

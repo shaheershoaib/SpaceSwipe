@@ -48,13 +48,23 @@ when you let go. Your other monitors stay where they are.
 | Three-finger swipe down | That monitor's desktop space |
 | `Ctrl` + `Alt` + `Win` + `←` / `→` / `↑` / `↓` | The same from the keyboard |
 
-Prefer Windows' Task View for swipe up? Untick *Swipe up shows app overview* in the tray menu.
 
 A *space* is any maximized or full-screen (F11, borderless) window. Spaces stay in a stable order and new ones are added at
 the end. Minimized windows aren't spaces, the same as on macOS.
 
-Right-click the tray icon to pause SpaceSwipe, turn the animation off, toggle *Start with Windows*, reopen setup, view the
-log, or uninstall.
+## Settings
+
+Open **SpaceSwipe** from the Start menu while it's running, or double-click its tray icon. Changes apply immediately.
+
+- **Monitors**: turn SpaceSwipe on or off per display. Displays are listed by name and position, and *Identify displays*
+  shows their numbers. These settings follow the physical monitor even if Windows renumbers displays (e.g. after a KVM switch).
+- **Gestures**: left/right switching, slide animation, reverse direction, swipe up (overview, Windows Task View or
+  nothing), swipe down (desktop or nothing), and swipe distance.
+- **Spaces**: whether borderless full-screen windows (games, F11 browsers) count, plus a list of apps that never count.
+- **Keyboard**: the `Ctrl` + `Alt` + `Win` + arrow shortcuts.
+- **About**: check for updates, the project page, setup checks and the log.
+
+The tray menu also lets you pause SpaceSwipe or uninstall it.
 
 ## Update
 

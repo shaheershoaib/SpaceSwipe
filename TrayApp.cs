@@ -10,6 +10,7 @@ internal static class Program
 {
     const string MutexName = @"Local\SpaceSwipe";
     public const string ExitEventName = @"Local\SpaceSwipe.Exit";
+    public const string ShowSettingsEventName = @"Local\SpaceSwipe.ShowSettings";
 
     [STAThread]
     static void Main(string[] args)
@@ -89,7 +90,17 @@ internal static class Program
         }
 
         using var mutex = new Mutex(true, MutexName, out bool created);
-        if (!created) return;
+        if (!created)
+        {
+            // Already running (e.g. opened again from the Start menu): show its Settings window.
+            try
+            {
+                using var show = new EventWaitHandle(false, EventResetMode.AutoReset, ShowSettingsEventName);
+                show.Set();
+            }
+            catch (Exception ex) { Log.Write("couldn't reach the running SpaceSwipe: " + ex.Message); }
+            return;
+        }
 
         if (!settings.SetupDone)
         {
@@ -140,6 +151,19 @@ internal sealed class Settings
     public bool SwipeDownShowsDesktop { get; set; } = true;
     public bool LogTouchFrames { get; set; }
     public bool SetupDone { get; set; }
+
+    /// <summary>Three-finger drag left/right switches spaces.</summary>
+    public bool SwipeSideways { get; set; } = true;
+    /// <summary>Content moves opposite to the fingers (off = natural, like macOS).</summary>
+    public bool ReverseDirection { get; set; }
+    /// <summary>Borderless full-screen windows (games, F11 browsers) count as spaces.</summary>
+    public bool IncludeBorderlessFullScreen { get; set; } = true;
+    /// <summary>App executables (e.g. "steam.exe") that are never spaces.</summary>
+    public List<string> ExcludedApps { get; set; } = new();
+    /// <summary>Stable IDs of monitors SpaceSwipe ignores (see DisplayInfo).</summary>
+    public List<string> DisabledMonitors { get; set; } = new();
+    /// <summary>Ctrl+Alt+Win + arrow shortcuts.</summary>
+    public bool KeyboardShortcuts { get; set; } = true;
 
     public static string FilePath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SpaceSwipe", "settings.json");
@@ -227,7 +251,7 @@ internal sealed class MessageWindow : NativeWindow
 internal sealed class TrayContext : ApplicationContext
 {
     const int HK_PREV = 1, HK_NEXT = 2, HK_DESKTOP = 3, HK_OVERVIEW = 4;
-    const int WM_EXIT_REQUEST = WM_APP + 2;
+    const int WM_EXIT_REQUEST = WM_APP + 2, WM_SHOW_SETTINGS = WM_APP + 3;
 
     readonly Settings settings;
     readonly WindowTracker tracker = new();
@@ -275,12 +299,9 @@ internal sealed class TrayContext : ApplicationContext
         bool raw = gestures.Register(msg.Handle);
         Log.Write($"SpaceSwipe {Application.ProductVersion} started; touchpad raw input registered={raw}");
 
-        const uint mods = MOD_CONTROL | MOD_ALT | MOD_WIN | MOD_NOREPEAT;
-        RegisterKey(HK_PREV, mods, VK_LEFT);
-        RegisterKey(HK_NEXT, mods, VK_RIGHT);
-        RegisterKey(HK_DESKTOP, mods, VK_DOWN);
-        RegisterKey(HK_OVERVIEW, mods, VK_UP);
+        RegisterHotkeys();
 
+        tracker.Settings = settings;
         tracker.Snapshot(); // seed the per-monitor order
 
         // A newer copy (upgrade) or the uninstaller can ask us to exit.
@@ -291,6 +312,17 @@ internal sealed class TrayContext : ApplicationContext
             PostMessage(msg.Handle, WM_EXIT_REQUEST, IntPtr.Zero, IntPtr.Zero);
         }) { IsBackground = true, Name = "exit-request" }.Start();
 
+        // Launching SpaceSwipe again (Start menu) asks us to open Settings.
+        var showRequest = new EventWaitHandle(false, EventResetMode.AutoReset, Program.ShowSettingsEventName);
+        new Thread(() =>
+        {
+            while (true)
+            {
+                showRequest.WaitOne();
+                PostMessage(msg.Handle, WM_SHOW_SETTINGS, IntPtr.Zero, IntPtr.Zero);
+            }
+        }) { IsBackground = true, Name = "show-settings" }.Start();
+
         tray = new NotifyIcon
         {
             Icon = TrayIcon.Create(),
@@ -298,6 +330,7 @@ internal sealed class TrayContext : ApplicationContext
             Visible = true,
             ContextMenuStrip = BuildMenu(),
         };
+        tray.DoubleClick += (_, _) => ShowSettings();
     }
 
     void RegisterKey(int id, uint mods, uint vk)
@@ -324,10 +357,14 @@ internal sealed class TrayContext : ApplicationContext
             case WM_EXIT_REQUEST:
                 ExitThread();
                 break;
+            case WM_SHOW_SETTINGS:
+                ShowSettings();
+                break;
             case WM_DISPLAYCHANGE:
                 // Monitors changed (e.g. a KVM switch): put parked windows back and let Windows rearrange them.
                 Log.Write("display change: unparking all windows");
                 parking.UnparkAll();
+                DisplayInfo.Invalidate();
                 break;
         }
     }
@@ -436,35 +473,10 @@ internal sealed class TrayContext : ApplicationContext
         menu.Items.Add(new ToolStripMenuItem($"SpaceSwipe {Installer.Version}") { Enabled = false });
         menu.Items.Add(new ToolStripSeparator());
 
-        menu.Items.Add(Toggle("Enabled", settings.Enabled, v => { settings.Enabled = v; settings.Save(); }));
-        menu.Items.Add(Toggle("Slide animation", settings.Animate, v => { settings.Animate = v; settings.Save(); }));
-        menu.Items.Add(Toggle("Swipe up shows app overview (off = Task View)", settings.SwipeUpOverview,
-            v => { settings.SwipeUpOverview = v; settings.Save(); }));
-        var startup = Toggle("Start with Windows", Startup.IsEnabled, v => Startup.Set(v));
-        menu.Items.Add(startup);
-        menu.Items.Add(new ToolStripMenuItem("Setup…", null, (_, _) =>
-        {
-            using var setup = new SetupForm(installed: true);
-            setup.ShowDialog();
-            Startup.Set(setup.StartWithWindows);
-            startup.Checked = setup.StartWithWindows;
-        }));
+        menu.Items.Add(new ToolStripMenuItem("Settings…", null, (_, _) => ShowSettings()) { Font = new Font(menu.Font, FontStyle.Bold) });
+        enabledItem = Toggle("SpaceSwipe is on", settings.Enabled, v => { settings.Enabled = v; settings.Save(); });
+        menu.Items.Add(enabledItem);
         menu.Items.Add(new ToolStripSeparator());
-
-        var help = new ToolStripMenuItem("Gestures");
-        foreach (var line in new[]
-                 {
-                     "3-finger drag left / right: move between apps on this monitor",
-                     "3 fingers up: this monitor's app overview",
-                     "3 fingers down: this monitor's desktop",
-                     "Keyboard: Ctrl+Alt+Win + Left / Right / Up / Down",
-                 })
-            help.DropDownItems.Add(new ToolStripMenuItem(line) { Enabled = false });
-        menu.Items.Add(help);
-        menu.Items.Add(new ToolStripMenuItem("Open log", null, (_, _) =>
-        {
-            if (File.Exists(Log.FilePath)) Process.Start(new ProcessStartInfo(Log.FilePath) { UseShellExecute = true });
-        }));
         menu.Items.Add(new ToolStripMenuItem("Project page", null, (_, _) =>
             Process.Start(new ProcessStartInfo(Installer.RepoUrl) { UseShellExecute = true })));
         menu.Items.Add(new ToolStripSeparator());
@@ -480,6 +492,38 @@ internal sealed class TrayContext : ApplicationContext
         }));
         menu.Items.Add(new ToolStripMenuItem("Exit", null, (_, _) => ExitThread()));
         return menu;
+    }
+
+    ToolStripMenuItem? enabledItem;
+    SettingsForm? settingsForm;
+
+    void ShowSettings()
+    {
+        if (settingsForm != null) { settingsForm.Activate(); return; }
+        settingsForm = new SettingsForm(settings);
+        settingsForm.Changed += ApplySettings;
+        settingsForm.FormClosed += (_, _) => { settingsForm.Dispose(); settingsForm = null; };
+        settingsForm.Show();
+        SpaceSwitcher.Focus(settingsForm.Handle);
+    }
+
+    /// <summary>Apply settings that need more than being read at the next swipe.</summary>
+    void ApplySettings()
+    {
+        RegisterHotkeys();
+        if (enabledItem != null && enabledItem.Checked != settings.Enabled) enabledItem.Checked = settings.Enabled;
+        tracker.Snapshot(); // re-evaluate spaces (excluded apps, borderless full screen)
+    }
+
+    void RegisterHotkeys()
+    {
+        foreach (var id in new[] { HK_PREV, HK_NEXT, HK_DESKTOP, HK_OVERVIEW }) UnregisterHotKey(msg.Handle, id);
+        if (!settings.KeyboardShortcuts) return;
+        const uint mods = MOD_CONTROL | MOD_ALT | MOD_WIN | MOD_NOREPEAT;
+        RegisterKey(HK_PREV, mods, VK_LEFT);
+        RegisterKey(HK_NEXT, mods, VK_RIGHT);
+        RegisterKey(HK_DESKTOP, mods, VK_DOWN);
+        RegisterKey(HK_OVERVIEW, mods, VK_UP);
     }
 
     static ToolStripMenuItem Toggle(string text, bool initial, Action<bool> onChange)

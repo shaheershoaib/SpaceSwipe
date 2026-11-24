@@ -164,6 +164,8 @@ internal sealed class SpaceSwitcher(WindowTracker tracker, SlideOverlay overlay,
             Log.Write($"skip: no real monitor under the cursor ({mon.Device})");
             return false;
         }
+        if (settings.DisabledMonitors.Count > 0 && settings.DisabledMonitors.Contains(DisplayInfo.StableId(mon.Device)))
+            return false; // turned off for this monitor in Settings
         return true;
     }
 
@@ -255,7 +257,7 @@ internal sealed class SpaceSwitcher(WindowTracker tracker, SlideOverlay overlay,
     public void DragBegin()
     {
         drag = null;
-        if (!settings.Animate || !CanAct(out _)) return;
+        if (!settings.Animate || !settings.SwipeSideways || !CanAct(out _)) return;
         try
         {
             var ctx = Context.Capture(tracker);
@@ -285,6 +287,7 @@ internal sealed class SpaceSwitcher(WindowTracker tracker, SlideOverlay overlay,
         try
         {
             // Content follows the fingers: fingers left => old space moves left, next space comes from the right.
+            if (settings.ReverseDirection) fx = -fx;
             double raw = fx / settings.FullSwipeFraction * d.W;
             int dir = raw < 0 ? 1 : raw > 0 ? -1 : 0;
             bool has = dir != 0 && d.Ctx.Ci + dir >= 0 && d.Ctx.Ci + dir < d.Ctx.Spaces.Count;
@@ -314,10 +317,11 @@ internal sealed class SpaceSwitcher(WindowTracker tracker, SlideOverlay overlay,
     {
         var d = drag;
         drag = null;
+        if (settings.ReverseDirection) { fx = -fx; vfx = -vfx; }
         if (d == null)
         {
             // Animation off (or drag refused): fall back to a plain switch.
-            if (settings.Enabled && !settings.Animate && Math.Abs(fx) >= settings.SwipeThreshold)
+            if (settings.Enabled && settings.SwipeSideways && !settings.Animate && Math.Abs(fx) >= settings.SwipeThreshold)
                 Navigate(fx < 0 ? 1 : -1);
             return;
         }

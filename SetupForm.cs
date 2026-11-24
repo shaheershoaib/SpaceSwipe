@@ -12,7 +12,7 @@ internal sealed class SetupForm : Form
     {
         AutoSize = true,
         MaximumSize = new Size(520, 0),
-        ForeColor = SystemColors.GrayText,
+        ForeColor = Color.FromArgb(88, 88, 96),
         Margin = new Padding(24, 0, 0, 4),
         Text = "In Settings: Bluetooth & devices → Touchpad → Three-finger gestures → set Swipes to \"Nothing\".",
     };
@@ -22,7 +22,7 @@ internal sealed class SetupForm : Form
     {
         AutoSize = true,
         MaximumSize = new Size(520, 0),
-        ForeColor = SystemColors.GrayText,
+        ForeColor = Color.FromArgb(88, 88, 96),
         Margin = new Padding(24, 0, 0, 4),
     };
     readonly Button mergeDesktops = new() { Text = "Merge into one desktop", AutoSize = true, Margin = new Padding(24, 0, 0, 12) };
@@ -103,7 +103,7 @@ internal sealed class SetupForm : Form
                    "up opens that monitor's app overview · down shows its desktop. Keyboard: Ctrl+Alt+Win + ←/→/↑/↓.",
             AutoSize = true,
             MaximumSize = new Size(540, 0),
-            ForeColor = SystemColors.GrayText,
+            ForeColor = Color.FromArgb(88, 88, 96),
             Margin = new Padding(0, 0, 0, 16),
         });
 
