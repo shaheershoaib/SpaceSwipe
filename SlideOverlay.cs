@@ -72,6 +72,18 @@ internal sealed class SlideOverlay : NativeWindow, IDisposable
     Shot? before, after, back;
     RECT stage;
 
+    /// <summary>
+    /// Live window previews (DWM thumbnails) for the current and neighbouring space. They go through the same colour
+    /// pipeline as the real window (HDR included), cost nothing to show, and need no switching or screenshots.
+    /// </summary>
+    sealed class Live
+    {
+        public IntPtr Thumb;
+        public Rectangle Crop;   // visible part of the source window (empty = whole window)
+    }
+
+    Live? curLive, nextLive;
+
     /// <summary>The snapshot currently shown as the old space (for diagnostics).</summary>
     public Shot? Before => before;
 
@@ -102,8 +114,92 @@ internal sealed class SlideOverlay : NativeWindow, IDisposable
         base.WndProc(ref m);
     }
 
+    public RECT StageRect => stage;
+
     /// <summary>Distance the content moves for one full space change (stage width plus a small gap).</summary>
     public double Travel => stage.Width + Math.Max(16, stage.Width / 80);
+
+    // ---------------- live (finger-tracked swipes) ----------------
+
+    /// <summary>
+    /// Cover the stage with a live preview of the current app (or a snapshot of the desktop, which has no window).
+    /// Nothing underneath changes, so there's no need to wait before showing it.
+    /// </summary>
+    public void BeginLive(RECT r, IntPtr currentApp)
+    {
+        Cleanup();
+        stage = r;
+        back = Shot.Blank(r.Width, r.Height);
+        if (currentApp != IntPtr.Zero) curLive = Register(currentApp);
+        if (curLive == null) before = Shot.Capture(r);
+        Compose(0, before, 0, null);
+        Present();
+        PlaceLive(curLive, 0, true);
+        SetWindowPos(Handle, HWND_TOPMOST, r.Left, r.Top, r.Width, r.Height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        Present();
+    }
+
+    /// <summary>Show a neighbouring app as a live preview. Returns false if Windows wouldn't provide one.</summary>
+    public bool SetAfterLive(IntPtr app)
+    {
+        ClearAfter();
+        nextLive = Register(app);
+        return nextLive != null;
+    }
+
+    /// <summary>Show a neighbouring space from a picture (the desktop). Takes ownership of the shot.</summary>
+    public void SetAfterImage(Shot shot)
+    {
+        ClearAfter();
+        after = shot;
+    }
+
+    Live? Register(IntPtr hwnd)
+    {
+        if (DwmRegisterThumbnail(Handle, hwnd, out var t) != 0 || t == IntPtr.Zero) return null;
+        DwmQueryThumbnailSourceSize(t, out var size);
+        int w = stage.Width, h = stage.Height;
+        // Maximized windows hang a few invisible border pixels off each edge: crop them so it lines up exactly.
+        var crop = size.cx >= w && size.cy >= h ? new Rectangle((size.cx - w) / 2, (size.cy - h) / 2, w, h) : Rectangle.Empty;
+        var live = new Live { Thumb = t, Crop = crop };
+        HideLive(live);
+        return live;
+    }
+
+    void PlaceLive(Live? l, int x, bool show)
+    {
+        if (l == null) return;
+        int w = stage.Width, h = stage.Height;
+        int left = Math.Max(0, x), right = Math.Min(w, x + w);
+        if (!show || right <= left) { HideLive(l); return; }
+        var p = new DWM_THUMBNAIL_PROPERTIES { fVisible = 1, opacity = 255 };
+        if (l.Crop.IsEmpty)
+        {
+            p.dwFlags = DWM_TNP_VISIBLE | DWM_TNP_RECTDESTINATION | DWM_TNP_OPACITY;
+            p.rcDestination = new RECT { Left = x, Top = 0, Right = x + w, Bottom = h };
+        }
+        else
+        {
+            p.dwFlags = DWM_TNP_VISIBLE | DWM_TNP_RECTDESTINATION | DWM_TNP_RECTSOURCE | DWM_TNP_OPACITY;
+            p.rcDestination = new RECT { Left = left, Top = 0, Right = right, Bottom = h };
+            p.rcSource = new RECT { Left = l.Crop.Left + (left - x), Top = l.Crop.Top, Right = l.Crop.Left + (right - x), Bottom = l.Crop.Top + h };
+        }
+        DwmUpdateThumbnailProperties(l.Thumb, ref p);
+    }
+
+    static void HideLive(Live l)
+    {
+        var p = new DWM_THUMBNAIL_PROPERTIES { dwFlags = DWM_TNP_VISIBLE, fVisible = 0 };
+        DwmUpdateThumbnailProperties(l.Thumb, ref p);
+    }
+
+    static void Unregister(ref Live? l)
+    {
+        if (l != null) DwmUnregisterThumbnail(l.Thumb);
+        l = null;
+    }
+
+    // ---------------- snapshot (keyboard shortcuts) ----------------
 
     /// <summary>Freeze the stage: snapshot it and put the snapshot on top.</summary>
     public void Begin(RECT r)
@@ -139,6 +235,7 @@ internal sealed class SlideOverlay : NativeWindow, IDisposable
     {
         after?.Dispose();
         after = null;
+        Unregister(ref nextLive);
     }
 
     /// <summary>
@@ -147,23 +244,26 @@ internal sealed class SlideOverlay : NativeWindow, IDisposable
     /// </summary>
     public void Render(double offset, int side)
     {
-        double travel = Travel;
-        Compose((int)Math.Round(offset), before,
-                (int)Math.Round(side > 0 ? offset + travel : offset - travel), side != 0 ? after : null);
+        Frame(offset, side);
         Present();
+    }
+
+    /// <summary>Position everything for one frame (pictures into the back buffer, live previews via DWM).</summary>
+    void Frame(double offset, int side)
+    {
+        double travel = Travel;
+        int cx = (int)Math.Round(offset);
+        int nx = (int)Math.Round(side > 0 ? offset + travel : offset - travel);
+        Compose(cx, before, nx, side != 0 ? after : null);
+        PlaceLive(curLive, cx, true);
+        PlaceLive(nextLive, nx, side != 0);
     }
 
     /// <summary>Ease the offset from one value to another, e.g. finishing or cancelling a drag.</summary>
     public void AnimateOffset(double from, double to, int durationMs, int side)
     {
         if (back == null) return;
-        Animate(durationMs, t =>
-        {
-            double o = from + (to - from) * EaseOut(t);
-            double travel = Travel;
-            Compose((int)Math.Round(o), before,
-                    (int)Math.Round(side > 0 ? o + travel : o - travel), side != 0 ? after : null);
-        });
+        Animate(durationMs, t => Frame(from + (to - from) * EaseOut(t), side));
     }
 
     /// <summary>Rubber-band nudge when there is no space in that direction.</summary>
@@ -221,6 +321,8 @@ internal sealed class SlideOverlay : NativeWindow, IDisposable
         before?.Dispose(); before = null;
         after?.Dispose(); after = null;
         back?.Dispose(); back = null;
+        Unregister(ref curLive);
+        Unregister(ref nextLive);
     }
 
     public void Dispose()

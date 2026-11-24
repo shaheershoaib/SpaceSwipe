@@ -21,6 +21,11 @@ internal static class Program
             SelfTest.Run(args.Length > 1 ? args[1] : Path.Combine(Log.Dir, "selftest"));
             return;
         }
+        if (args.Length > 1 && args[0].Equals("--redraw-test", StringComparison.OrdinalIgnoreCase))
+        {
+            SelfTest.Redraw(args[1], args.Length > 2 ? args[2] : Path.Combine(Log.Dir, "selftest"));
+            return;
+        }
         if (args.Length > 0 && args[0].Equals("--park-test", StringComparison.OrdinalIgnoreCase))
         {
             SelfTest.Park(args.Length > 1 ? args[1] : Path.Combine(Log.Dir, "selftest"));

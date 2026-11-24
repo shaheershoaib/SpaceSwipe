@@ -93,6 +93,49 @@ internal static class SelfTest
     }
 
     /// <summary>
+    /// `--redraw-test "title"`: cover the named app with another maximized app on its monitor, bring it back,
+    /// and capture at fine intervals to see how long it keeps changing after it comes forward.
+    /// </summary>
+    public static void Redraw(string titlePart, string outDir)
+    {
+        Directory.CreateDirectory(outDir);
+        var report = new List<string>();
+        var snap = new WindowTracker().Snapshot();
+        var target = snap.FirstOrDefault(w => w.Title.Contains(titlePart, StringComparison.OrdinalIgnoreCase));
+        var cover = target == null ? null : snap.FirstOrDefault(w => w.Monitor == target.Monitor && w.Hwnd != target.Hwnd && w.Kind == WinKind.Maximized);
+        if (target == null || cover == null)
+        {
+            File.WriteAllText(Path.Combine(outDir, "redraw.txt"), $"need '{titlePart}' and another maximized app on the same monitor");
+            return;
+        }
+        var prior = GetForegroundWindow();
+        var mon = WindowTracker.GetMonitor(MonitorFromWindow(target.Hwnd, MONITOR_DEFAULTTONEAREST));
+
+        SpaceSwitcher.Focus(cover.Hwnd);
+        Thread.Sleep(1500); // let it settle while covered (Chromium stops drawing occluded windows)
+
+        int[] times = [0, 8, 16, 25, 33, 50, 66, 90, 120, 160, 250, 400, 700];
+        var shots = new List<(long t, Bitmap b)>();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        SpaceSwitcher.Focus(target.Hwnd);
+        foreach (var t in times)
+        {
+            while (sw.ElapsedMilliseconds < t) Thread.Sleep(1);
+            using var s = Shot.Capture(mon.Work);
+            shots.Add((sw.ElapsedMilliseconds, s.ToBitmap()));
+        }
+        var final = shots[^1].b;
+        report.Add($"'{target.Title}' on {mon.Device}, covered by '{cover.Title}':");
+        report.Add("changed vs final -> " + string.Join("  ", shots.Select(s => $"{s.t}ms:{Compare(s.b, final).changed:P1}")));
+        for (int i = 0; i < shots.Count; i++)
+            if (i is 0 or 2 or 4 or 6) shots[i].b.Save(Path.Combine(outDir, $"r{shots[i].t}ms.png"), ImageFormat.Png);
+        final.Save(Path.Combine(outDir, "r-final.png"), ImageFormat.Png);
+        foreach (var s in shots) s.b.Dispose();
+        SpaceSwitcher.Focus(prior);
+        File.WriteAllLines(Path.Combine(outDir, "redraw.txt"), report);
+    }
+
+    /// <summary>
     /// `--park-test`: move a maximized app just below the screen (instead of minimizing it), bring it back,
     /// and measure how quickly it is fully drawn again.
     /// </summary>
@@ -160,6 +203,8 @@ internal static class SelfTest
             bmp.UnlockBits(d);
         }
     }
+
+    public static double ChangedFraction(Bitmap a, Bitmap b) => Compare(a, b).changed;
 
     static (double mean, int max, double changed) Compare(Bitmap a, Bitmap b)
     {

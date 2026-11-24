@@ -128,9 +128,8 @@ internal sealed class OverviewForm : Form
         selected = focusIndex = ci;
         glideTimer.Tick += (_, _) => Glide();
 
-        // The current app shrinks from (and grows back to) exactly what is on screen: use the screenshot.
-        if (cards.Count > 0 && cards[ci].Item.Hwnd != IntPtr.Zero)
-            cards[ci].Snap = Crop(clean, FullRectFor(cards[ci].Item.Kind));
+        // App cards (including the one that zooms) are live previews: true colours, even for HDR-rendering apps.
+        // Only the desktop, which has no window, is a picture.
     }
 
     static Shot Crop(Shot src, Rectangle r)
@@ -276,18 +275,21 @@ internal sealed class OverviewForm : Form
         focusIndex = i;
         Chosen?.Invoke(cards[i].Item.Hwnd); // the real switch happens underneath this window
 
-        // Zoom an exact screenshot of the result, so the hand-off to the real screen is seamless.
+        // An app zooms as its live preview (now focused, so it matches exactly). The desktop zooms as a fresh picture.
         DwmFlush();
         Thread.Sleep(25);
         DwmFlush();
-        var full = FullRect(i);
         var c = cards[i];
-        c.Snap?.Dispose();
-        c.Snap = Shot.Capture(new RECT
+        if (c.Item.Hwnd == IntPtr.Zero)
         {
-            Left = full.Left + mon.Bounds.Left, Top = full.Top + mon.Bounds.Top,
-            Right = full.Right + mon.Bounds.Left, Bottom = full.Bottom + mon.Bounds.Top,
-        });
+            var full = FullRect(i);
+            c.Snap?.Dispose();
+            c.Snap = Shot.Capture(new RECT
+            {
+                Left = full.Left + mon.Bounds.Left, Top = full.Top + mon.Bounds.Top,
+                Right = full.Right + mon.Bounds.Left, Bottom = full.Bottom + mon.Bounds.Top,
+            });
+        }
         RefreshScreen(); // the background fades to the real result, not the old screen
 
         glideTimer.Stop();

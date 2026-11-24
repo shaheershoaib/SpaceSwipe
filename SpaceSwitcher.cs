@@ -235,8 +235,9 @@ internal sealed class SpaceSwitcher(WindowTracker tracker, SlideOverlay overlay,
     sealed class Prepared
     {
         public IntPtr Target;                    // zero = desktop
-        public bool WasParked;                   // app: it was parked and we brought it back
-        public List<IntPtr> Parked = new();     // desktop: windows we parked underneath
+        public bool SwitchedUnderneath;          // fallback path only: the real switch already happened
+        public bool WasParked;                   // ...and the app was parked and brought back
+        public List<IntPtr> Parked = new();
         public IntPtr PriorForeground;
     }
 
@@ -264,9 +265,10 @@ internal sealed class SpaceSwitcher(WindowTracker tracker, SlideOverlay overlay,
                         ctx.Space(ctx.Ci + 1)?.Kind == WinKind.FullScreen
                 ? ctx.Mon.Bounds : ctx.Mon.Work;
 
-            Log.Write($"{ctx.Mon.Device}: drag over {ctx.Describe()} current={ctx.Ci}");
-            overlay.Begin(stage);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            overlay.BeginLive(stage, ctx.Cur?.Hwnd ?? IntPtr.Zero);
             drag = new DragState { Ctx = ctx, W = stage.Width };
+            Log.Write($"{ctx.Mon.Device}: drag over {ctx.Describe()} current={ctx.Ci} ({sw.ElapsedMilliseconds} ms)");
         }
         catch (Exception ex)
         {
@@ -339,7 +341,16 @@ internal sealed class SpaceSwitcher(WindowTracker tracker, SlideOverlay overlay,
 
             Log.Write($"drag release offset={o / d.W:P0} v={v / d.W:F2}W/s -> {(commit ? "switch" : "cancel")}");
             overlay.AnimateOffset(o, target, (int)ms, d.PreparedDir);
-            if (!commit) Unprepare(d); // the overlay still shows the old space while we put it back
+            if (commit && d.Prep is { } p)
+            {
+                // Now do the real switch, behind the final frame (which already shows the target exactly).
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                SwitchTo(d.Ctx, p.Target, out _);
+                DwmFlush();
+                DwmFlush();
+                if (p.Target == IntPtr.Zero) { Thread.Sleep(15); DwmFlush(); } // the desktop needs a frame to appear
+                Log.Write($"switched after release in {sw.ElapsedMilliseconds} ms");
+            }
         }
         catch (Exception ex)
         {
@@ -366,35 +377,54 @@ internal sealed class SpaceSwitcher(WindowTracker tracker, SlideOverlay overlay,
         return Math.Sign(raw) * r * (1 - 1 / (x / r * 0.6 + 1));
     }
 
-    /// <summary>Switch to the neighbouring space underneath the overlay and snapshot it.</summary>
+    /// <summary>
+    /// Bring the neighbouring space onto the overlay. Apps are live previews (instant, true colours); the desktop
+    /// uses its cached picture. Nothing on screen changes until the fingers lift.
+    /// </summary>
     void Prepare(DragState d, int dir)
     {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         var t = d.Ctx.Spaces[d.Ctx.Ci + dir];
         var p = new Prepared { Target = t, PriorForeground = GetForegroundWindow() };
-        p.WasParked = SwitchTo(d.Ctx, t, out p.Parked);
-        WaitForRepaint();
-        overlay.SetAfter();
+        string how;
+        if (t != IntPtr.Zero && overlay.SetAfterLive(t))
+        {
+            how = "live";
+        }
+        else if (t == IntPtr.Zero)
+        {
+            // Cached look of this monitor's desktop, or photograph it once (apps parked for an instant, behind the overlay).
+            var shot = DesktopCache.CopyOf(d.Ctx.Mon.Device) ?? CaptureDesktop(d.Ctx.Mon);
+            if (shot != null) overlay.SetAfterImage(shot);
+            how = "desktop picture";
+        }
+        else
+        {
+            // No live preview available: fall back to switching underneath and photographing it.
+            p.WasParked = SwitchTo(d.Ctx, t, out p.Parked);
+            p.SwitchedUnderneath = true;
+            WaitForRepaint();
+            overlay.SetAfterImage(Shot.Capture(overlay.StageRect));
+            how = "switched + snapshot";
+        }
         d.Prep = p;
         d.PreparedDir = dir;
+        Log.Write($"prepared {(t == IntPtr.Zero ? "Desktop" : Short(d.Ctx.Present[t].Title))} ({how}, {sw.ElapsedMilliseconds} ms)");
     }
 
-    /// <summary>Undo <see cref="Prepare"/>: put the original space back underneath the overlay.</summary>
+    /// <summary>Undo <see cref="Prepare"/>.</summary>
     void Unprepare(DragState d)
     {
         var p = d.Prep;
         if (p == null) return;
-        if (p.Target == IntPtr.Zero)
-        {
-            foreach (var h in p.Parked) parking.Unpark(h);
-        }
-        else
+        if (p.SwitchedUnderneath)
         {
             if (d.Ctx.Cur != null)
                 SetWindowPos(p.Target, d.Ctx.Cur.Hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             if (p.WasParked) parking.Park(p.Target, d.Ctx.Mon.Device);
+            Focus(p.PriorForeground);
+            WaitForRepaint();
         }
-        Focus(p.PriorForeground);
-        WaitForRepaint();
         overlay.ClearAfter();
         d.Prep = null;
         d.PreparedDir = 0;

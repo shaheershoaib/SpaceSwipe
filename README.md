@@ -69,19 +69,21 @@ Afterwards you can set *Touchpad → Three-finger gestures → Swipes* back to *
 
 - **Gestures:** SpaceSwipe reads raw Precision Touchpad reports (HID digitizer usage page `0x0D`) in the background and
   tracks three-finger contacts itself, so it gets continuous finger positions rather than a one-shot "swipe" event.
-- **The slide:** when a drag starts, a click-through overlay covers that monitor with a snapshot of the current app.
-  The neighbouring app is brought forward underneath and snapshotted, and the two images follow your fingers. If you
-  cancel, the original app is put back before the overlay disappears. The overlay is excluded from screen capture, so
-  it can photograph what's really underneath it.
+- **The slide:** when a drag starts, a click-through overlay covers that monitor and shows the current and
+  neighbouring apps as live window previews (DWM thumbnails) that follow your fingers. Nothing on screen changes
+  during the drag, so it starts instantly. The real switch happens when you let go, behind a final frame that already
+  shows the target. Previews go through the same colour pipeline as the real windows, so apps that render in HDR
+  (Chromium/Electron apps on an HDR display) look identical. Screenshots don't: Windows squeezes HDR output into
+  standard colour when it captures the screen.
 - **The desktop space:** going to the desktop doesn't minimize your apps. It moves them just below the screen. A
   minimized window is shrunk by Windows and can take ~0.4 s to redraw when it comes back, which would show up as a
   wrong or half-drawn frame mid-swipe. Parked windows stay full size and fully drawn, so they slide back in instantly.
   A parked app comes straight back if you pick it with Alt+Tab, the taskbar or Task View. All parked apps come back
   if SpaceSwipe exits or crashes, or if your monitors change (e.g. a KVM switch).
-- **The overview:** the whole animation is driven by one progress value tied to your fingers. The current app is an
-  exact screenshot that shrinks into its card while the background blurs. The other spaces are live window previews
-  (DWM thumbnails) that fade in. When you pick one, SpaceSwipe switches to it behind the overview, takes a
-  screenshot, and grows that to full screen, so the hand-off to the real app is seamless.
+- **The overview:** the whole animation is driven by one progress value tied to your fingers. Every app card is a
+  live window preview. The current one shrinks into its slot while the background blurs, and the others fade in.
+  When you pick one, SpaceSwipe switches to it behind the overview and grows its preview to full screen, so the
+  hand-off to the real app is seamless. Only the desktop card is a picture, cached each time you visit it.
 
 ## Build from source
 
