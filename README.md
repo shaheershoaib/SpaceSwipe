@@ -12,6 +12,7 @@ when you let go. Your other monitors stay where they are.
 - 🖐️ **Finger-tracked**: the slide follows your fingers. A flick or a drag past about 30% switches, anything less springs back.
 - 🖥️ **Per monitor**: like macOS with *"Displays have separate Spaces"* turned on. Windows' own virtual desktops switch every monitor at once.
 - 🪟 **Overview, like Mission Control**: swipe up with three fingers and the current app shrinks, following your fingers, into a row of live cards with every space on that monitor. Click one to zoom into it.
+  The Desktop card shows your live wallpaper with that desktop's windows spread out so none overlap; click a window to go to the desktop with it in front.
 - ↔️ **Rearrange spaces**: drag cards in the overview to reorder them, or drag a card to a screen edge to send that app to another display.
 - 🏠 **Desktop space**: the first space on each monitor is its desktop with your normal windows. Three-finger swipe down jumps straight to it.
 - ⌨️ **Alt+Tab still works**, and so do the taskbar and Win+Tab.
@@ -44,6 +45,7 @@ when you let go. Your other monitors stay where they are.
 | Three-finger drag left / right | Slide to the next / previous full-screen app **on the monitor under the cursor** |
 | Three-finger drag up | That monitor's overview: its spaces as live cards (follows your fingers; let go to open) |
 | In the overview | Click a card, or `←` `→` + `Enter`, to switch. `Esc`, a click on the background, or a three-finger swipe down closes it |
+| Click a window in the Desktop card | Go to that monitor's desktop with that window in front and focused |
 | Drag a card in the overview | Reorder that monitor's spaces (`Ctrl` + `←` / `→` does the same). Drag it to the edge facing another display and let go to move the app there |
 | Three-finger swipe down | That monitor's desktop space |
 | `Ctrl` + `Alt` + `Win` + `←` / `→` / `↑` / `↓` | The same from the keyboard |
@@ -93,7 +95,9 @@ Afterwards you can set *Touchpad → Three-finger gestures → Swipes* back to *
 - **The overview:** the whole animation is driven by one progress value tied to your fingers. Every app card is a
   live window preview. The current one shrinks into its slot while the background blurs, and the others fade in.
   When you pick one, SpaceSwipe switches to it behind the overview and grows its preview to full screen, so the
-  hand-off to the real app is seamless. Only the desktop card is a picture, cached each time you visit it.
+  hand-off to the real app is seamless. The Desktop card is a live preview of the desktop itself (wallpaper and
+  icons) with a live preview of each of its windows on top, laid out in rows by where they sit on screen. When you
+  go to the desktop, those windows glide back to their real positions as the card grows to full screen.
 
 ## Build from source
 

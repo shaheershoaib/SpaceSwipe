@@ -45,14 +45,16 @@ internal sealed class SpaceSwitcher(WindowTracker tracker, SlideOverlay overlay,
     public sealed record SpaceItem(IntPtr Hwnd, string Title, WinKind Kind, bool Current);
 
     /// <summary>The spaces of the monitor under the cursor (Desktop first), or null if there is nothing to show.</summary>
-    public (MonitorDesc Mon, List<SpaceItem> Spaces)? GetSpaces()
+    public (MonitorDesc Mon, List<SpaceItem> Spaces, List<IntPtr> DesktopWindows)? GetSpaces()
     {
         if (!CanAct(out _)) return null;
         var ctx = Context.Capture(tracker);
         var items = ctx.Spaces.Select((h, i) => h == IntPtr.Zero
             ? new SpaceItem(IntPtr.Zero, "Desktop", WinKind.None, i == ctx.Ci)
             : new SpaceItem(h, ctx.Present[h].Title, ctx.Present[h].Kind, i == ctx.Ci)).ToList();
-        return (ctx.Mon, items);
+        // The Desktop card shows that desktop's ordinary windows spread out inside it (not the spaces themselves).
+        var windows = tracker.DesktopWindows(ctx.Mon.Device).Where(h => !ctx.Present.ContainsKey(h)).ToList();
+        return (ctx.Mon, items, windows);
     }
 
     /// <summary>
@@ -147,6 +149,20 @@ internal sealed class SpaceSwitcher(WindowTracker tracker, SlideOverlay overlay,
             SwitchTo(ctx, target, out _);
         }
         catch (Exception ex) { Log.Write("activate space failed: " + ex); }
+    }
+
+    /// <summary>Go to a monitor's desktop space with one of its windows in front and focused (picked in the overview).</summary>
+    public void ActivateDesktopWindow(MonitorDesc mon, IntPtr window)
+    {
+        try
+        {
+            var ctx = Context.Capture(tracker, mon);
+            foreach (var w in ctx.Present.Values.Where(w => w.IsShowing).OrderBy(w => w.Z))
+                parking.Park(w.Hwnd, ctx.Mon.Device);
+            Focus(IsWindow(window) ? window : tracker.TopWindowOn(ctx.Mon.Device));
+            RefreshDesktopCacheSoon(ctx.Mon);
+        }
+        catch (Exception ex) { Log.Write("activate desktop window failed: " + ex); }
     }
 
     /// <summary>False when there is nothing sensible to act on (e.g. a game is running, or a KVM switched the screens away).</summary>

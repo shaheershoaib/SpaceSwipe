@@ -27,6 +27,11 @@ internal static class Program
             SelfTest.Redraw(args[1], args.Length > 2 ? args[2] : Path.Combine(Log.Dir, "selftest"));
             return;
         }
+        if (args.Length > 0 && args[0].Equals("--overview-test", StringComparison.OrdinalIgnoreCase))
+        {
+            SelfTest.Overview(args.Length > 1 ? args[1] : Path.Combine(Log.Dir, "selftest"), args.Length > 2 ? args[2] : null);
+            return;
+        }
         if (args.Length > 0 && args[0].Equals("--park-test", StringComparison.OrdinalIgnoreCase))
         {
             SelfTest.Park(args.Length > 1 ? args[1] : Path.Combine(Log.Dir, "selftest"));
@@ -450,13 +455,14 @@ internal sealed class TrayContext : ApplicationContext
         try
         {
             var mon = s.Mon;
-            var form = new OverviewForm(mon, s.Spaces, () => switcher.CaptureDesktop(mon));
+            var form = new OverviewForm(mon, s.Spaces, () => switcher.CaptureDesktop(mon), s.DesktopWindows);
             form.Chosen += h => switcher.ActivateSpace(mon, h);
+            form.WindowChosen += h => switcher.ActivateDesktopWindow(mon, h);
             form.Reordered += order => switcher.Reorder(mon, order);
             form.MoveRequested += (h, target) => switcher.MoveToMonitor(h, target);
             form.FormClosed += (_, _) => { if (overview == form) overview = null; form.Dispose(); };
             overview = form;
-            Log.Write($"{mon.Device}: overview with {s.Spaces.Count} space(s)");
+            Log.Write($"{mon.Device}: overview with {s.Spaces.Count} space(s), {s.DesktopWindows.Count} desktop window(s)");
             return form;
         }
         catch (Exception ex)

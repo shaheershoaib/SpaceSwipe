@@ -27,6 +27,17 @@ internal sealed class OverviewForm : Form
         public Shot? Snap;          // exact screenshot used while this card is the one zooming (no live-preview blip)
     }
 
+    /// <summary>An ordinary window on the desktop, shown as a small live preview inside the Desktop card.</summary>
+    sealed class MiniWin
+    {
+        public IntPtr Hwnd;
+        public IntPtr Thumb;
+        public Rectangle Crop;      // visible frame inside the thumbnail source (drops the invisible resize borders)
+        public RectangleF Real;     // where it really is, as a fraction of the work area
+        public RectangleF Home;     // its spot in the Desktop card when spread out, same units
+        public double Lift;         // 0..1: grows a little while the pointer is over it
+    }
+
     enum State { Opening, Open, Closing }
 
     static readonly Color Accent = Color.FromArgb(0x8B, 0x5C, 0xF6);
@@ -56,6 +67,15 @@ internal sealed class OverviewForm : Form
     readonly IntPtr priorForeground;
     readonly Func<Shot?>? captureDesktop;
     bool needDesktopCapture;
+    readonly List<MiniWin> minis = new();   // the desktop's windows, bottom of the z-order first
+    IntPtr deskThumb;                       // live preview of the desktop itself (wallpaper + icons, no windows)
+    Rectangle deskCrop;
+    int DesktopIndex => cards.FindIndex(c => c.Item.Hwnd == IntPtr.Zero);
+    int hoverMini = -1, pressMini = -1;     // desktop window under the pointer / pressed (index into minis)
+    double miniDim;                         // 0..1: the other desktop windows dim while one is hovered
+
+    /// <summary>A desktop window was picked in the Desktop card: go to the desktop with it in front.</summary>
+    public event Action<IntPtr>? WindowChosen;
     Shot? back;
     static readonly Dictionary<uint, string> appNames = new();
     float scale = 1f;
@@ -68,11 +88,28 @@ internal sealed class OverviewForm : Form
 
     public bool IsOpen => state == State.Open;
 
-    public OverviewForm(MonitorDesc mon, List<SpaceSwitcher.SpaceItem> spaces, Func<Shot?>? captureDesktop = null)
+    /// <summary>Normally true. The overview test turns it off so the open overview can be photographed.</summary>
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public bool ExcludeFromCapture { get; init; } = true;
+
+    public OverviewForm(MonitorDesc mon, List<SpaceSwitcher.SpaceItem> spaces, Func<Shot?>? captureDesktop = null,
+                        List<IntPtr>? desktopWindows = null)
     {
         this.mon = mon;
         this.captureDesktop = captureDesktop;
         priorForeground = GetForegroundWindow();
+
+        float ww = Math.Max(1, mon.Work.Width), wh = Math.Max(1, mon.Work.Height);
+        foreach (var h in desktopWindows ?? new List<IntPtr>())
+        {
+            var f = VisibleFrame(h);
+            minis.Add(new MiniWin
+            {
+                Hwnd = h,
+                Real = new RectangleF((f.Left - mon.Work.Left) / ww, (f.Top - mon.Work.Top) / wh, f.Width / ww, f.Height / wh),
+            });
+        }
+        LayoutMinis();
 
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
@@ -132,6 +169,60 @@ internal sealed class OverviewForm : Form
         // Only the desktop, which has no window, is a picture.
     }
 
+    /// <summary>
+    /// Spread the desktop's windows out inside the Desktop card so none overlap, keeping their sizes in proportion
+    /// and roughly where they are: split into rows by height on screen, left to right within a row, all scaled by
+    /// the largest factor that fits. Computed in work-area pixels, stored as fractions of the card.
+    /// </summary>
+    void LayoutMinis()
+    {
+        int n = minis.Count;
+        if (n == 0) return;
+        double W = Math.Max(1, mon.Work.Width), H = Math.Max(1, mon.Work.Height);
+        double gap = W * 0.03;
+        double areaL = W * 0.06, areaT = H * 0.08, areaW = W * 0.88, areaH = H * 0.84;
+        var px = minis.Select(m => (w: m.Real.Width * W, h: m.Real.Height * H, cx: (m.Real.X + m.Real.Width / 2) * W, cy: (m.Real.Y + m.Real.Height / 2) * H)).ToList();
+        var byY = Enumerable.Range(0, n).OrderBy(i => px[i].cy).ThenBy(i => px[i].cx).ToList();
+
+        double best = -1;
+        List<List<int>>? bestRows = null;
+        for (int r = 1; r <= n; r++)
+        {
+            var rows = new List<List<int>>();
+            for (int k = 0, idx = 0; k < r; k++)
+            {
+                int cnt = n / r + (k < n % r ? 1 : 0);
+                rows.Add(byY.Skip(idx).Take(cnt).OrderBy(i => px[i].cx).ToList());
+                idx += cnt;
+            }
+            double s = double.MaxValue, sumH = 0;
+            foreach (var row in rows)
+            {
+                s = Math.Min(s, (areaW - gap * (row.Count - 1)) / row.Sum(i => px[i].w));
+                sumH += row.Max(i => px[i].h);
+            }
+            s = Math.Min(s, (areaH - gap * (r - 1)) / sumH);
+            if (s > best + 1e-9) { best = s; bestRows = rows; }
+        }
+        if (bestRows == null) return;
+        double sc = Math.Clamp(best, 0.02, 0.85);
+        double total = bestRows.Sum(row => row.Max(i => px[i].h) * sc) + gap * (bestRows.Count - 1);
+        double y = areaT + Math.Max(0, (areaH - total) / 2);
+        foreach (var row in bestRows)
+        {
+            double rowH = row.Max(i => px[i].h) * sc;
+            double rowW = row.Sum(i => px[i].w * sc) + gap * (row.Count - 1);
+            double x = areaL + (areaW - rowW) / 2;
+            foreach (var i in row)
+            {
+                double w = px[i].w * sc, h = px[i].h * sc;
+                minis[i].Home = new RectangleF((float)(x / W), (float)((y + (rowH - h) / 2) / H), (float)(w / W), (float)(h / H));
+                x += w + gap;
+            }
+            y += rowH + gap;
+        }
+    }
+
     static Shot Crop(Shot src, Rectangle r)
     {
         var s = Shot.Blank(r.Width, r.Height);
@@ -161,7 +252,7 @@ internal sealed class OverviewForm : Form
     {
         base.OnHandleCreated(e);
         scale = Math.Max(1f, GetDpiForWindow(Handle) / 96f);
-        SetWindowDisplayAffinity(Handle, WDA_EXCLUDEFROMCAPTURE); // so we can photograph what's underneath
+        if (ExcludeFromCapture) SetWindowDisplayAffinity(Handle, WDA_EXCLUDEFROMCAPTURE); // so we can photograph what's underneath
         int on = 1;
         DwmSetWindowAttribute(Handle, DWMWA_TRANSITIONS_FORCEDISABLED, ref on, 4); // no window-open animation
         EnsureBackBuffer();
@@ -175,6 +266,41 @@ internal sealed class OverviewForm : Form
                 ? new Rectangle((size.cx - vis.Width) / 2, (size.cy - vis.Height) / 2, vis.Width, vis.Height)
                 : Rectangle.Empty;
         }
+        if (minis.Count > 0) RegisterDesktopThumbs();
+    }
+
+    /// <summary>
+    /// The Desktop card: a live preview of the desktop itself (the shell's desktop window: wallpaper and icons,
+    /// no app windows), with each desktop window's live preview on top. Registered after the app cards, the
+    /// desktop first and then the windows bottom-up, so they stack the right way.
+    /// </summary>
+    void RegisterDesktopThumbs()
+    {
+        var shell = GetShellWindow();
+        if (shell != IntPtr.Zero && DwmRegisterThumbnail(Handle, shell, out var dt) == 0)
+        {
+            deskThumb = dt;
+            GetWindowRect(shell, out var sr);
+            deskCrop = new Rectangle(mon.Work.Left - sr.Left, mon.Work.Top - sr.Top, mon.Work.Width, mon.Work.Height);
+        }
+        foreach (var m in minis) RegisterMini(m);
+    }
+
+    /// <summary>(Re-)register a desktop window's live preview; the latest registered is drawn on top.</summary>
+    void RegisterMini(MiniWin m)
+    {
+        if (m.Thumb != IntPtr.Zero) { DwmUnregisterThumbnail(m.Thumb); m.Thumb = IntPtr.Zero; }
+        if (DwmRegisterThumbnail(Handle, m.Hwnd, out var t) != 0) return;
+        m.Thumb = t;
+        // The source is the whole window rect; show only its visible frame (scaled, in case of DPI virtualization).
+        DwmQueryThumbnailSourceSize(t, out var size);
+        GetWindowRect(m.Hwnd, out var wr);
+        var f = VisibleFrame(m.Hwnd);
+        if (wr.Width <= 0 || wr.Height <= 0 || size.cx <= 0 || size.cy <= 0) return;
+        double sx = (double)size.cx / wr.Width, sy = (double)size.cy / wr.Height;
+        m.Crop = Rectangle.FromLTRB(
+            (int)Math.Round((f.Left - wr.Left) * sx), (int)Math.Round((f.Top - wr.Top) * sy),
+            (int)Math.Round((f.Right - wr.Left) * sx), (int)Math.Round((f.Bottom - wr.Top) * sy));
     }
 
     // ---------------- opening / closing (driven by fingers or animated) ----------------
@@ -268,11 +394,49 @@ internal sealed class OverviewForm : Form
     }
 
     /// <summary>Pick a space: switch to it underneath, then grow its card to full screen.</summary>
-    public void Choose(int i)
+    public void Choose(int i) => Choose(i, IntPtr.Zero);
+
+    /// <summary>
+    /// Pick a space; for the desktop, optionally one of its windows to bring to the front (<paramref name="window"/>).
+    /// </summary>
+    void Choose(int i, IntPtr window)
     {
         if (state != State.Open || i < 0 || i >= cards.Count) return;
         state = State.Closing;
         focusIndex = i;
+
+        if (cards[i].Item.Hwnd == IntPtr.Zero && deskThumb != IntPtr.Zero)
+        {
+            // The desktop with live previews: zoom straight away (the windows glide home, the picked one on top),
+            // and do the real switch behind the last frame, once everything is at rest.
+            int k = minis.FindIndex(m => m.Hwnd == window);
+            if (k >= 0)
+            {
+                var m = minis[k];
+                minis.RemoveAt(k);
+                minis.Add(m);
+                RegisterMini(m);
+            }
+            hoverMini = -1;
+            miniDim = 0;
+            foreach (var m in minis) m.Lift = 0;
+            glideTimer.Stop();
+            foreach (var x in cards) x.Rect = x.Home;
+            AnimateTo(0, beforeLastFrame: () =>
+            {
+                var sw = Stopwatch.StartNew();
+                if (window != IntPtr.Zero) WindowChosen?.Invoke(window);
+                else Chosen?.Invoke(IntPtr.Zero);
+                DwmFlush();
+                Thread.Sleep(25);
+                DwmFlush();
+                RefreshScreen(); // the last frame is the real result
+                Log.Write($"overview: switched to the desktop{(window != IntPtr.Zero ? " (window to front)" : "")} in {sw.ElapsedMilliseconds} ms");
+            });
+            Close();
+            return;
+        }
+
         Chosen?.Invoke(cards[i].Item.Hwnd); // the real switch happens underneath this window
 
         // An app zooms as its live preview (now focused, so it matches exactly). The desktop zooms as a fresh picture.
@@ -280,8 +444,9 @@ internal sealed class OverviewForm : Form
         Thread.Sleep(25);
         DwmFlush();
         var c = cards[i];
-        if (c.Item.Hwnd == IntPtr.Zero)
+        if (c.Item.Hwnd == IntPtr.Zero && deskThumb == IntPtr.Zero)
         {
+            // (With the live desktop preview, the desktop's windows glide back into place instead.)
             var full = FullRect(i);
             c.Snap?.Dispose();
             c.Snap = Shot.Capture(new RECT
@@ -323,24 +488,47 @@ internal sealed class OverviewForm : Form
             focusIndex = -1;
         }
         else focusIndex = CurrentIndex;
-        if (wasOpen && priorForeground != IntPtr.Zero && IsWindow(priorForeground)) SpaceSwitcher.Focus(priorForeground);
         AnimateTo(0);
+        // Give focus back only once the animation is done: it can block for ~100 ms, which froze the windows
+        // right as the fingers lifted. The overview still shows the final (exact) frame meanwhile.
+        if (wasOpen && priorForeground != IntPtr.Zero && IsWindow(priorForeground))
+        {
+            var sw = Stopwatch.StartNew();
+            SpaceSwitcher.Focus(priorForeground);
+            Log.Write($"overview: focus returned in {sw.ElapsedMilliseconds} ms");
+        }
         Close();
     }
 
-    void AnimateTo(double target)
+    /// <param name="beforeLastFrame">Runs just before the final frame (everything is nearly at rest on screen meanwhile).</param>
+    void AnimateTo(double target, Action? beforeLastFrame = null)
     {
         double from = progress;
         double ms = Math.Clamp(Math.Abs(target - from) * 380, 110, 320);
         var sw = Stopwatch.StartNew();
+        double last = 0, worst = 0, worstRender = 0;
+        int frames = 0;
         while (true)
         {
             double t = Math.Min(1, sw.Elapsed.TotalMilliseconds / ms);
+            if (t >= 1 && beforeLastFrame != null)
+            {
+                beforeLastFrame();
+                beforeLastFrame = null;
+                last = sw.Elapsed.TotalMilliseconds; // (not an animation frame)
+            }
             progress = from + (target - from) * EaseOut(t);
+            double r0 = sw.Elapsed.TotalMilliseconds;
             Render(progress, false);
+            worstRender = Math.Max(worstRender, sw.Elapsed.TotalMilliseconds - r0);
             if (DwmFlush() != 0) Thread.Sleep(6);
+            double now = sw.Elapsed.TotalMilliseconds;
+            worst = Math.Max(worst, now - last);
+            last = now;
+            frames++;
             if (t >= 1) break;
         }
+        Log.Write($"overview animate {from:F2}->{target:F2}: {frames} frames in {last:F0} ms, slowest frame {worst:F1} ms (render {worstRender:F1} ms)");
     }
 
     static double EaseOut(double t) => 1 - Math.Pow(1 - t, 3);
@@ -418,6 +606,11 @@ internal sealed class OverviewForm : Form
         }
         else bannerAnim = bannerTarget;
 
+        // Desktop windows under the pointer: ease the lift and the dimming of the others.
+        moving |= Ease(ref miniDim, hoverMini >= 0 ? 1 : 0);
+        for (int k = 0; k < minis.Count; k++)
+            moving |= Ease(ref minis[k].Lift, k == hoverMini ? 1 : 0);
+
         for (int i = 0; i < cards.Count; i++)
         {
             var c = cards[i];
@@ -431,6 +624,14 @@ internal sealed class OverviewForm : Form
         }
         Render(1, true);
         if (!moving) glideTimer.Stop();
+    }
+
+    /// <summary>Move a 0..1 animation value a step towards its target; true while still moving.</summary>
+    static bool Ease(ref double v, double target)
+    {
+        if (Math.Abs(target - v) < 0.01) { v = target; return false; }
+        v += (target - v) * 0.3;
+        return true;
     }
 
     static int Step(int from, int to)
@@ -638,19 +839,23 @@ internal sealed class OverviewForm : Form
         if (back == null) return;
         int w = back.W, h = back.H;
         // Anything outside the captured monitor area (shouldn't happen) stays black rather than white.
-        PatBlt(back.Dc, 0, 0, w, h, BLACKNESS);
+        int cw = Math.Min(w, clean.W), ch = Math.Min(h, clean.H);
+        if (cw < w || ch < h) PatBlt(back.Dc, 0, 0, w, h, BLACKNESS);
 
         // Background: the real screen, crossfading into the blurred + dimmed version.
-        int cw = Math.Min(w, clean.W), ch = Math.Min(h, clean.H);
-        BitBlt(back.Dc, 0, 0, cw, ch, clean.Dc, 0, 0, SRCCOPY);
+        // (Each full-screen copy costs real frame time, so skip the ones that can't be seen.)
         byte bg = (byte)(255 * Math.Clamp(p, 0, 1));
-        if (blurTask.IsCompletedSuccessfully)
-        {
-            var blur = blurTask.Result;
-            AlphaBlend(back.Dc, 0, 0, Math.Min(cw, blur.W), Math.Min(ch, blur.H), blur.Dc, 0, 0, Math.Min(cw, blur.W), Math.Min(ch, blur.H), ConstantAlpha(bg));
-        }
+        var blur = blurTask.IsCompletedSuccessfully ? blurTask.Result : null;
+        if (blur != null && bg == 255 && blur.W >= cw && blur.H >= ch)
+            BitBlt(back.Dc, 0, 0, cw, ch, blur.Dc, 0, 0, SRCCOPY);
         else
-            AlphaBlend(back.Dc, 0, 0, w, h, black.Dc, 0, 0, 1, 1, ConstantAlpha((byte)(bg * 0.55)));
+        {
+            BitBlt(back.Dc, 0, 0, cw, ch, clean.Dc, 0, 0, SRCCOPY);
+            if (bg > 0 && blur != null)
+                AlphaBlend(back.Dc, 0, 0, Math.Min(cw, blur.W), Math.Min(ch, blur.H), blur.Dc, 0, 0, Math.Min(cw, blur.W), Math.Min(ch, blur.H), ConstantAlpha(bg));
+            else if (bg > 0)
+                AlphaBlend(back.Dc, 0, 0, w, h, black.Dc, 0, 0, 1, 1, ConstantAlpha((byte)(bg * 0.55)));
+        }
 
         // Shadows behind cards once settled (live previews are drawn on top by the compositor).
         Graphics? g = labels ? Graphics.FromHdc(back.Dc) : null;
@@ -675,7 +880,16 @@ internal sealed class OverviewForm : Form
                 continue;
             }
             if (c.Item.Hwnd != IntPtr.Zero) continue;
-            if (c.Image != null)
+            if (minis.Count > 0 && DesktopLiveCovers(p) && !(i == focusIndex && c.Snap != null))
+                continue; // the live desktop preview is on top of it; don't spend frame time drawing what can't be seen
+            if (i == focusIndex && minis.Count > 0)
+            {
+                // The desktop growing to / shrinking from full screen: the real screen (exact, shadows and all)
+                // shows through while the live desktop preview on top is still fading in.
+                var wk = WorkInClient();
+                StretchBlt(back.Dc, r.Left, r.Top, r.Width, r.Height, clean.Dc, wk.Left, wk.Top, wk.Width, wk.Height, SRCCOPY);
+            }
+            else if (c.Image != null)
             {
                 var src = CoverSource(c.Image.W, c.Image.H, r.Width, r.Height);
                 if (a == 255) StretchBlt(back.Dc, r.Left, r.Top, r.Width, r.Height, c.Image.Dc, src.Left, src.Top, src.Width, src.Height, SRCCOPY);
@@ -732,7 +946,9 @@ internal sealed class OverviewForm : Form
         var hr = new Rectangle(0, ClientSize.Height - (int)(56 * scale), ClientSize.Width, (int)(30 * scale));
         string text = dragIndex >= 0
             ? "Drop to reorder  ·  drag onto another display to move the app there"
-            : "Click an app  ·  drag to reorder or onto another display  ·  Esc or swipe down to close";
+            : minis.Count > 0
+                ? "Click an app, or a window on the desktop  ·  drag to reorder or onto another display  ·  Esc or swipe down to close"
+                : "Click an app  ·  drag to reorder or onto another display  ·  Esc or swipe down to close";
         TextRenderer.DrawText(g, text, hint, hr,
             Color.FromArgb(190, 255, 255, 255), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
     }
@@ -827,6 +1043,114 @@ internal sealed class OverviewForm : Form
             }
             DwmUpdateThumbnailProperties(c.Thumb, ref props);
         }
+        UpdateDesktopThumbs(p);
+    }
+
+    /// <summary>
+    /// Place the Desktop card's live previews. When the desktop is the card growing to / shrinking from full screen,
+    /// its windows travel between where they really are (progress 0) and their spread-out spots (1).
+    /// </summary>
+    void UpdateDesktopThumbs(double p)
+    {
+        if (minis.Count == 0) return;
+        int d = DesktopIndex;
+        bool focus = d >= 0 && d == focusIndex;
+        var card = d >= 0 ? RectAt(d, p) : Rectangle.Empty;
+        byte a = d >= 0 ? AlphaAt(d, p) : (byte)0;
+        bool hidden = d < 0 || a == 0 || card.Width <= 0 || card.Height <= 0 || (focus && cards[d].Snap != null);
+        double q = focus ? Math.Clamp(p, 0, 1) : 1;
+
+        if (deskThumb != IntPtr.Zero)
+        {
+            // Covers everything except the exact start/end frame (progress 0), where the photo of the real screen
+            // shows instead: it matches the screen pixel for pixel (shadows too). No crossfade in between, or
+            // copies of the windows would show up at their final spots while the previews are still on the way.
+            byte da = focus && !DesktopLiveCovers(p) ? (byte)0 : a;
+            Place(deskThumb, hidden || da == 0 ? Rectangle.Empty : card, deskCrop, da);
+        }
+        for (int k = 0; k < minis.Count; k++)
+        {
+            var m = minis[k];
+            if (m.Thumb == IntPtr.Zero) continue;
+            var dest = MiniRect(m, card, q);
+            // Hover: the window under the pointer grows a little; the others dim a little.
+            if (m.Lift > 0.001) dest = Scale(dest, 1 + 0.06 * m.Lift);
+            byte ma = k == hoverMini ? a : (byte)(a * (1 - 0.16 * miniDim));
+            // Keep it inside the card (a window may hang off the screen or over the taskbar): clip, and crop the source to match.
+            var clip = Rectangle.Intersect(dest, card);
+            var src = m.Crop.IsEmpty ? Rectangle.Empty : m.Crop;
+            if (!src.IsEmpty && clip != dest && dest.Width > 0 && dest.Height > 0 && clip.Width > 0 && clip.Height > 0)
+            {
+                double sx = (double)src.Width / dest.Width, sy = (double)src.Height / dest.Height;
+                src = Rectangle.FromLTRB(
+                    src.Left + (int)Math.Round((clip.Left - dest.Left) * sx), src.Top + (int)Math.Round((clip.Top - dest.Top) * sy),
+                    src.Right - (int)Math.Round((dest.Right - clip.Right) * sx), src.Bottom - (int)Math.Round((dest.Bottom - clip.Bottom) * sy));
+            }
+            Place(m.Thumb, hidden || clip.Width <= 0 || clip.Height <= 0 ? Rectangle.Empty : clip, src, ma);
+        }
+    }
+
+    /// <summary>Where a desktop window is drawn in the Desktop card: between its real spot (q = 0) and its spread-out spot (1).</summary>
+    static Rectangle MiniRect(MiniWin m, Rectangle card, double q)
+    {
+        float fx = (float)(m.Real.X + (m.Home.X - m.Real.X) * q), fy = (float)(m.Real.Y + (m.Home.Y - m.Real.Y) * q);
+        float fw = (float)(m.Real.Width + (m.Home.Width - m.Real.Width) * q), fh = (float)(m.Real.Height + (m.Home.Height - m.Real.Height) * q);
+        return Rectangle.FromLTRB(
+            card.Left + (int)Math.Round(fx * card.Width), card.Top + (int)Math.Round(fy * card.Height),
+            card.Left + (int)Math.Round((fx + fw) * card.Width), card.Top + (int)Math.Round((fy + fh) * card.Height));
+    }
+
+    /// <summary>Overview test: hover desktop window k (runs the hover animation to the end).</summary>
+    internal void TestHoverWindow(int k)
+    {
+        if (k < 0 || k >= minis.Count) return;
+        hoverMini = k;
+        for (int i = 0; i < 40; i++) { Glide(); DwmFlush(); }
+    }
+
+    /// <summary>Overview test: click desktop window k.</summary>
+    internal void TestChooseWindow(int k)
+    {
+        if (k >= 0 && k < minis.Count) Choose(DesktopIndex, minis[k].Hwnd);
+    }
+
+    /// <summary>The desktop window under a point in the open overview's Desktop card (index into minis), or -1.</summary>
+    int MiniAt(Point pt)
+    {
+        int d = DesktopIndex;
+        if (state != State.Open || d < 0 || dragIndex >= 0) return -1;
+        var card = cards[d].Rect;
+        if (!card.Contains(pt)) return -1;
+        for (int k = minis.Count - 1; k >= 0; k--)
+            if (minis[k].Thumb != IntPtr.Zero && MiniRect(minis[k], card, 1).Contains(pt)) return k;
+        return -1;
+    }
+
+    /// <summary>The live desktop preview is showing (so nothing we draw underneath the Desktop card can be seen).</summary>
+    bool DesktopLiveCovers(double p) => deskThumb != IntPtr.Zero && p > 0.0005;
+
+    /// <summary>Show a live preview at <paramref name="dest"/> (empty = hide), showing <paramref name="src"/> of its window (empty = all).</summary>
+    static void Place(IntPtr thumb, Rectangle dest, Rectangle src, byte alpha)
+    {
+        var props = new DWM_THUMBNAIL_PROPERTIES();
+        if (dest.Width <= 0 || dest.Height <= 0)
+        {
+            props.dwFlags = DWM_TNP_VISIBLE;
+            props.fVisible = 0;
+        }
+        else
+        {
+            props.dwFlags = DWM_TNP_VISIBLE | DWM_TNP_RECTDESTINATION | DWM_TNP_OPACITY;
+            props.fVisible = 1;
+            props.opacity = alpha;
+            props.rcDestination = new RECT { Left = dest.Left, Top = dest.Top, Right = dest.Right, Bottom = dest.Bottom };
+            if (!src.IsEmpty)
+            {
+                props.dwFlags |= DWM_TNP_RECTSOURCE;
+                props.rcSource = new RECT { Left = src.Left, Top = src.Top, Right = src.Right, Bottom = src.Bottom };
+            }
+        }
+        DwmUpdateThumbnailProperties(thumb, ref props);
     }
 
     protected override void OnPaintBackground(PaintEventArgs e) { /* drawn in Render */ }
@@ -870,6 +1194,7 @@ internal sealed class OverviewForm : Form
         base.OnMouseDown(e);
         if (state != State.Open || e.Button != MouseButtons.Left) return;
         pressIndex = HitTest(e.Location);
+        pressMini = MiniAt(e.Location);
         pressPos = e.Location;
     }
 
@@ -887,17 +1212,27 @@ internal sealed class OverviewForm : Form
         }
         int h = HitTest(e.Location);
         if (h != hover) { hover = h; if (h >= 0) selected = h; Invalidate(); }
+        int hm = MiniAt(e.Location);
+        if (hm != hoverMini) { hoverMini = hm; glideTimer.Start(); }
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        base.OnMouseLeave(e);
+        if (hoverMini >= 0 && state == State.Open) { hoverMini = -1; glideTimer.Start(); }
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
         if (state != State.Open || e.Button != MouseButtons.Left) return;
-        int pressed = pressIndex;
-        pressIndex = -1;
+        int pressed = pressIndex, pressedMini = pressMini;
+        pressIndex = pressMini = -1;
         if (dragIndex >= 0) { EndDrag(); return; }
         int i = HitTest(e.Location);
-        if (i >= 0 && i == pressed) Choose(i);
+        // A window inside the Desktop card: go to the desktop with that window in front.
+        if (pressedMini >= 0 && pressedMini == MiniAt(e.Location)) Choose(DesktopIndex, minis[pressedMini].Hwnd);
+        else if (i >= 0 && i == pressed) Choose(i);
         else if (i < 0 && pressed < 0) Dismiss();
     }
 
@@ -938,6 +1273,9 @@ internal sealed class OverviewForm : Form
             c.Image?.Dispose();
             c.Snap?.Dispose();
         }
+        if (deskThumb != IntPtr.Zero) DwmUnregisterThumbnail(deskThumb);
+        foreach (var m in minis)
+            if (m.Thumb != IntPtr.Zero) DwmUnregisterThumbnail(m.Thumb);
         clean.Dispose();
         black.Dispose();
         back?.Dispose();

@@ -163,6 +163,17 @@ internal static class Native
     public static uint ConstantAlpha(byte a) => (uint)a << 16;
 
     [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int value, int size);
+    [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT value, int size);
+    public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+
+    /// <summary>The visible frame of a window (GetWindowRect includes Windows 10/11's invisible resize borders).</summary>
+    public static RECT VisibleFrame(IntPtr h)
+    {
+        if (DwmGetWindowAttribute(h, DWMWA_EXTENDED_FRAME_BOUNDS, out RECT r, System.Runtime.InteropServices.Marshal.SizeOf<RECT>()) == 0 && r.Right > r.Left)
+            return r;
+        GetWindowRect(h, out r);
+        return r;
+    }
     [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int value, int size);
     [DllImport("dwmapi.dll")] public static extern int DwmFlush();
     [DllImport("dwmapi.dll")] public static extern int DwmRegisterThumbnail(IntPtr dest, IntPtr src, out IntPtr thumb);

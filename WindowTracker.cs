@@ -169,6 +169,30 @@ internal sealed class WindowTracker
     public IReadOnlyList<IntPtr> Ring(string device) =>
         rings.TryGetValue(device, out var r) ? r : Array.Empty<IntPtr>();
 
+    /// <summary>
+    /// The ordinary windows on a monitor's desktop space (not minimized, not parked, not a space), bottom of the
+    /// z-order first. These are what the overview spreads out when it opens on the desktop.
+    /// </summary>
+    public List<IntPtr> DesktopWindows(string device)
+    {
+        var list = new List<IntPtr>();
+        EnumWindows((h, _) =>
+        {
+            if (!IsAppWindow(h) || IsIconic(h) || (Parking?.IsParked(h) ?? false)) return true;
+            var md = GetMonitor(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST));
+            if (md.Device != device) return true;
+            var f = VisibleFrame(h);
+            if (f.Width < 40 || f.Height < 40) return true;
+            // Must actually be on screen there (not off below the screen, e.g. parked by another copy).
+            if (f.Right <= md.Bounds.Left + 20 || f.Left >= md.Bounds.Right - 20 ||
+                f.Bottom <= md.Bounds.Top + 20 || f.Top >= md.Bounds.Bottom - 20) return true;
+            list.Add(h);
+            return true;
+        }, IntPtr.Zero);
+        list.Reverse();
+        return list;
+    }
+
     /// <summary>Topmost ordinary (non-minimized) app window on the given monitor, or zero.</summary>
     public IntPtr TopWindowOn(string device, Func<IntPtr, bool>? filter = null)
     {

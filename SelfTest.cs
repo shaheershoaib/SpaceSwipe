@@ -45,6 +45,71 @@ internal static class SelfTest
     }
 
     /// <summary>
+    /// `--overview-test [folder] [\\.\DISPLAYn]`: open the desktop overview (spread-out windows) on a monitor,
+    /// visible to capture this time, and photograph it at progress 0, 0.5 and fully open. Moves no windows.
+    /// </summary>
+    public static void Overview(string outDir, string? device)
+    {
+        Directory.CreateDirectory(outDir);
+        var report = new List<string>();
+        var mon = WindowTracker.MonitorAtCursor();
+        if (device != null)
+            foreach (var s in Screen.AllScreens)
+                if (s.DeviceName.Equals(device, StringComparison.OrdinalIgnoreCase))
+                    mon = WindowTracker.GetMonitor(MonitorFromPoint(new POINT { X = s.Bounds.Left + 10, Y = s.Bounds.Top + 10 }, MONITOR_DEFAULTTONEAREST));
+
+        var tracker = new WindowTracker();
+        var snap = tracker.Snapshot();
+        var wins = tracker.DesktopWindows(mon.Device)
+            .Where(h => snap.All(w => w.Hwnd != h)) // leave out maximized / full-screen apps (they're spaces)
+            .ToList();
+        // The current space: the frontmost full-screen app actually on this monitor, else the desktop.
+        var mb = new Rectangle(mon.Bounds.Left, mon.Bounds.Top, mon.Bounds.Width, mon.Bounds.Height);
+        var onMon = snap.Where(w => w.Monitor == mon.Device).ToList();
+        var cur = onMon.Where(w => { var f = VisibleFrame(w.Hwnd); return mb.IntersectsWith(Rectangle.FromLTRB(f.Left, f.Top, f.Right, f.Bottom)); })
+                       .OrderBy(w => w.Z).FirstOrDefault();
+        if (Environment.GetEnvironmentVariable("SPACESWIPE_TEST_AS_DESKTOP") == "1") cur = null; // time the desktop's own zoom
+        var spaces = new List<SpaceSwitcher.SpaceItem> { new(IntPtr.Zero, "Desktop", WinKind.None, cur == null) };
+        spaces.AddRange(onMon.Select(w => new SpaceSwitcher.SpaceItem(w.Hwnd, w.Title, w.Kind, w == cur)));
+        report.Add($"{mon.Device} {mon.Bounds}: {wins.Count} desktop window(s), {spaces.Count - 1} app space(s)");
+        foreach (var h in wins) report.Add($"  window: {TitleOf(h)}  frame {VisibleFrame(h)}");
+
+        using var before = Shot.Capture(mon.Bounds);
+        using (var b = before.ToBitmap()) b.Save(Path.Combine(outDir, "0-real-screen.png"), ImageFormat.Png);
+
+        var form = new OverviewForm(mon, spaces, null, wins) { ExcludeFromCapture = false };
+        void Save(string name)
+        {
+            DwmFlush(); DwmFlush(); Thread.Sleep(40); DwmFlush();
+            using var s = Shot.Capture(mon.Bounds);
+            using var bmp = s.ToBitmap();
+            bmp.Save(Path.Combine(outDir, name), ImageFormat.Png);
+            if (name.StartsWith("1-"))
+            {
+                using var bb = before.ToBitmap();
+                report.Add($"progress 0 vs real screen: changed pixels {ChangedFraction(bb, bmp):P2}");
+            }
+        }
+        form.BeginOpen();
+        Save("1-progress-0.png");
+        form.DragOpen(0.5);
+        Save("2-progress-50.png");
+        form.EndOpen(true);
+        Save("3-open.png");
+        if (wins.Count > 1 && Environment.GetEnvironmentVariable("SPACESWIPE_TEST_PICK_WINDOW") == "1")
+        {
+            // Hover and click a desktop window (the switch itself is only logged: this test moves no windows).
+            form.WindowChosen += h => report.Add($"window chosen: {TitleOf(h)}");
+            form.TestHoverWindow(1);
+            Save("4-hover.png");
+            form.TestChooseWindow(1);
+        }
+        else form.Dismiss();
+        if (!form.IsDisposed) form.Dispose();
+        File.WriteAllLines(Path.Combine(outDir, "overview.txt"), report);
+    }
+
+    /// <summary>
     /// `--activation-test`: focus each maximized app in turn and capture the screen over time,
     /// to see how long it keeps changing after it gets focus (title bar, Mica backdrop, repaint).
     /// </summary>
