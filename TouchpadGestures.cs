@@ -16,6 +16,7 @@ internal sealed class TouchpadGestures
         public readonly List<ushort> FingerLinks = new();
         public int XMin, XMax, YMin, YMax;
         public int CountLink = -1;
+        public double WidthMm = 130; // physical width (from the HID descriptor; a typical size if it doesn't say)
     }
 
     readonly record struct Contact(bool Tip, int X, int Y);
@@ -34,6 +35,15 @@ internal sealed class TouchpadGestures
     /// <summary>Movement before a drag starts, as a fraction of the touchpad width.</summary>
     public double DeadZone { get; set; } = 0.02;
     public bool LogFrames { get; set; }
+
+    /// <summary>How long the touch report being handled waited in the message queue (diagnostics).</summary>
+    public static int InputDelayMs;
+
+    /// <summary>Fingers used for space swipes: 3, or 4 while three-finger drag is on (like on a Mac).</summary>
+    public int SwipeFingers { get; set; } = 3;
+
+    /// <summary>Three-finger drag, fed every frame (it decides for itself whether it's on).</summary>
+    public ThreeFingerDrag? FingerDrag { get; set; }
 
     /// <summary>A vertical three-finger drag started (true = upwards).</summary>
     public event Action<bool>? VDragBegan;
@@ -129,7 +139,7 @@ internal sealed class TouchpadGestures
         Log.Write(result == null
             ? $"touchpad device {h}: not usable"
             : $"touchpad device {h}: fingers={result.FingerLinks.Count} X={result.XMin}..{result.XMax} " +
-              $"Y={result.YMin}..{result.YMax} countLink={result.CountLink}");
+              $"Y={result.YMin}..{result.YMax} countLink={result.CountLink} width={result.WidthMm:F0}mm");
         return result;
     }
 
@@ -152,6 +162,14 @@ internal sealed class TouchpadGestures
             {
                 if (!dev.FingerLinks.Contains(link)) dev.FingerLinks.Add(link);
                 dev.XMin = lmin; dev.XMax = lmax;
+                // Physical extent: Units 0x11 = centimetres, 0x13 = inches; UnitsExp is a 4-bit signed exponent.
+                uint unitsExp = BitConverter.ToUInt32(vc, o + 32), units = BitConverter.ToUInt32(vc, o + 36);
+                int pmin = BitConverter.ToInt32(vc, o + 48), pmax = BitConverter.ToInt32(vc, o + 52);
+                int exp = (int)(unitsExp & 0xF);
+                if (exp > 7) exp -= 16;
+                double mmPerUnit = (units & 0xFF) switch { 0x11 => 10.0, 0x13 => 25.4, _ => 0 };
+                double mm = (pmax - pmin) * Math.Pow(10, exp) * mmPerUnit;
+                if (mm is > 40 and < 400) dev.WidthMm = mm;
             }
             if (page == 0x01 && Has(0x31)) { dev.YMin = lmin; dev.YMax = lmax; }
             if (page == 0x0D && Has(0x54)) dev.CountLink = link;
@@ -193,6 +211,7 @@ internal sealed class TouchpadGestures
     /// <summary>Called on a timer: ends a drag if the touchpad stopped sending frames.</summary>
     public void CheckTimeout()
     {
+        FingerDrag?.Tick();
         if (mode is Mode.Drag or Mode.VDrag && Environment.TickCount64 - lastFrameMs > 300)
         {
             Log.Write("drag timed out (no touch frames)");
@@ -219,6 +238,7 @@ internal sealed class TouchpadGestures
             n++; cx += c.X; cy += c.Y;
         }
         if (LogFrames) Log.Write($"frame tips={n} slots={frame.Count} mode={mode}");
+        FingerDrag?.OnFrame(n, n > 0 ? cx / n : 0, n > 0 ? cy / n : 0, d.XMax - d.XMin, d.WidthMm);
 
         if (n == 0)
         {
@@ -226,11 +246,11 @@ internal sealed class TouchpadGestures
             mode = Mode.Idle;
             return;
         }
-        if (n != 3)
+        if (n != SwipeFingers)
         {
             if (mode is Mode.Drag or Mode.VDrag) EndDrag();
             // Fewer fingers while still landing: wait. More fingers, or a finished gesture: wait for a full lift.
-            mode = n > 3 || mode is Mode.Drag or Mode.VDrag or Mode.Done ? Mode.Done : Mode.Idle;
+            mode = n > SwipeFingers || mode is Mode.Drag or Mode.VDrag or Mode.Done ? Mode.Done : Mode.Idle;
             return;
         }
         if (mode == Mode.Done) return;

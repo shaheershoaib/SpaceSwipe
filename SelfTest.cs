@@ -110,6 +110,163 @@ internal static class SelfTest
     }
 
     /// <summary>
+    /// `--drag-test [folder]`: drag a throwaway window by its title bar with injected mouse input (like three-finger
+    /// drag) at the touchpad's ~90 updates/s, and record how far the window trails the pointer after each step.
+    /// </summary>
+    public static void Drag(string outDir)
+    {
+        Directory.CreateDirectory(outDir);
+        var report = new List<string>();
+        var mon = WindowTracker.GetMonitor(MonitorFromPoint(new POINT { X = 10, Y = 10 }, MONITOR_DEFAULTTONEAREST));
+        var form = new Form
+        {
+            Text = "SpaceSwipe drag test", StartPosition = FormStartPosition.Manual, TopMost = true,
+            Bounds = new Rectangle(mon.Work.Left + 200, mon.Work.Top + 200, 600, 400), BackColor = Color.DimGray,
+        };
+        GetCursorPos(out var original);
+        form.Shown += (_, _) => new Thread(() =>
+        {
+            try
+            {
+                Thread.Sleep(300);
+                IntPtr h = IntPtr.Zero;
+                form.Invoke(() => { h = form.Handle; SpaceSwitcher.Focus(h); });
+                Thread.Sleep(150);
+                GetWindowRect(h, out var r0);
+                int gx = r0.Left + 150, gy = r0.Top + 15; // on the title bar
+                Send(MouseTo(gx, gy));
+                Thread.Sleep(50);
+                Send(Mouse(MOUSEEVENTF_LEFTDOWN));
+                Thread.Sleep(80);
+                foreach (var (name, absolute) in new[] { ("relative", false), ("absolute", true) })
+                {
+                    GetCursorPos(out var c0);
+                    GetWindowRect(h, out var w0);
+                    var lags = new List<int>();
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    for (int i = 1; i <= 60; i++)
+                    {
+                        int dir = i <= 30 ? 1 : -1;
+                        if (absolute) { GetCursorPos(out var c); Send(MouseTo(c.X + 12 * dir, c.Y)); }
+                        else Send(Mouse(MOUSEEVENTF_MOVE, 12 * dir, 0));
+                        Thread.Sleep(11);
+                        GetCursorPos(out var cp);
+                        GetWindowRect(h, out var wr);
+                        lags.Add((cp.X - c0.X) - (wr.Left - w0.Left)); // pointer travel minus window travel
+                    }
+                    Thread.Sleep(150);
+                    GetCursorPos(out var c1);
+                    GetWindowRect(h, out var w1);
+                    report.Add($"{name}: 60 steps of 12 px in {sw.ElapsedMilliseconds} ms; window behind pointer after each step: " +
+                               $"avg {lags.Average(x => Math.Abs(x)):F1} px, max {lags.Max(x => Math.Abs(x))} px; settled offset {(c1.X - c0.X) - (w1.Left - w0.Left)} px");
+                    report.Add("  per step: " + string.Join(" ", lags));
+                }
+                Send(Mouse(MOUSEEVENTF_LEFTUP));
+            }
+            catch (Exception ex) { report.Add("failed: " + ex); try { Send(Mouse(MOUSEEVENTF_LEFTUP)); } catch { } }
+            finally
+            {
+                Send(MouseTo(original.X, original.Y));
+                form.BeginInvoke(form.Close);
+            }
+        }) { IsBackground = true }.Start();
+        Application.Run(form);
+        File.WriteAllLines(Path.Combine(outDir, "drag.txt"), report);
+    }
+
+    /// <summary>
+    /// `--move-test "title" [folder]`: move a real app's window ~6 px per step at ~90 steps/s, two ways: through
+    /// Windows' own move loop (title bar held with injected input) and by direct SetWindowPos from a helper thread.
+    /// Counts how many distinct positions the app actually reaches. Puts the window and pointer back afterwards.
+    /// </summary>
+    public static void Move(string titlePart, string outDir)
+    {
+        Directory.CreateDirectory(outDir);
+        var report = new List<string>();
+        IntPtr h = IntPtr.Zero;
+        EnumWindows((w, _) =>
+        {
+            if (IsWindowVisible(w) && !IsZoomed(w) && !IsIconic(w) && TitleOf(w).Contains(titlePart, StringComparison.OrdinalIgnoreCase)) { h = w; return false; }
+            return true;
+        }, IntPtr.Zero);
+        if (h == IntPtr.Zero) { File.WriteAllText(Path.Combine(outDir, "move.txt"), "window not found (or maximized)"); return; }
+        GetCursorPos(out var original);
+        GetWindowRect(h, out var start);
+        report.Add($"window: {TitleOf(h)} at {start}");
+
+        // A spot on its title bar.
+        POINT? grip = null;
+        for (int x = start.Right - 200; x > start.Left + 100 && grip == null; x -= 20)
+            for (int y = start.Top + 8; y < start.Top + 40 && grip == null; y += 6)
+            {
+                var lp = (IntPtr)((y & 0xFFFF) << 16 | (x & 0xFFFF));
+                if (SendMessageTimeout(h, WM_NCHITTEST, IntPtr.Zero, lp, SMTO_ABORTIFHUNG, 100, out var hit) != IntPtr.Zero && (int)hit == HTCAPTION)
+                    grip = new POINT { X = x, Y = y };
+            }
+        if (grip is not { } g) { File.WriteAllText(Path.Combine(outDir, "move.txt"), "no title bar spot found"); return; }
+
+        SpaceSwitcher.Focus(h);
+        Thread.Sleep(200);
+
+        (int distinct, double avgLag, int maxLag) Run(Action<int> step)
+        {
+            GetWindowRect(h, out var w0);
+            var seen = new HashSet<int>();
+            var lags = new List<int>();
+            for (int i = 1; i <= 60; i++)
+            {
+                int offset = i <= 30 ? i * 6 : (60 - i) * 6; // out 180 px and back
+                step(offset);
+                Thread.Sleep(11);
+                GetWindowRect(h, out var wr);
+                seen.Add(wr.Left);
+                lags.Add(Math.Abs(w0.Left + offset - wr.Left));
+            }
+            Thread.Sleep(300);
+            return (seen.Count, lags.Average(), lags.Max());
+        }
+
+        // 1) Windows' own move loop, driven by injected input (button held on the title bar).
+        Send(MouseTo(g.X, g.Y));
+        Thread.Sleep(60);
+        Send(Mouse(MOUSEEVENTF_LEFTDOWN));
+        Thread.Sleep(60);
+        Send(Mouse(MOUSEEVENTF_MOVE, 6, 0)); Send(Mouse(MOUSEEVENTF_MOVE, -6, 0)); // get past the drag threshold
+        Thread.Sleep(60);
+        var a = Run(off => Send(MouseTo(g.X + off, g.Y)));
+        Send(Mouse(MOUSEEVENTF_LEFTUP));
+        report.Add($"move loop (button held): {a.distinct} distinct positions of 31, lag avg {a.avgLag:F0} px, max {a.maxLag} px");
+        Thread.Sleep(300);
+        SetWindowPos(h, IntPtr.Zero, start.Left, start.Top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        Thread.Sleep(300);
+
+        // 2) Direct SetWindowPos from a helper thread, newest position wins.
+        int target = start.Left; bool pending = false; var wake = new AutoResetEvent(false); bool stop = false;
+        var mover = new Thread(() =>
+        {
+            while (!stop)
+            {
+                wake.WaitOne(50);
+                while (true)
+                {
+                    int x;
+                    lock (wake) { if (!pending) break; pending = false; x = target; }
+                    SetWindowPos(h, IntPtr.Zero, x, start.Top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                }
+            }
+        }) { IsBackground = true };
+        mover.Start();
+        var b = Run(off => { lock (wake) { target = start.Left + off; pending = true; } wake.Set(); });
+        stop = true;
+        report.Add($"direct moves (helper thread): {b.distinct} distinct positions of 31, lag avg {b.avgLag:F0} px, max {b.maxLag} px");
+
+        Thread.Sleep(200);
+        SetWindowPos(h, IntPtr.Zero, start.Left, start.Top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        Send(MouseTo(original.X, original.Y));
+        File.WriteAllLines(Path.Combine(outDir, "move.txt"), report);
+    }
+
+    /// <summary>
     /// `--activation-test`: focus each maximized app in turn and capture the screen over time,
     /// to see how long it keeps changing after it gets focus (title bar, Mica backdrop, repaint).
     /// </summary>

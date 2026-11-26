@@ -35,7 +35,12 @@ internal static class Installer
             // Clear out files from older builds, then copy ourselves in.
             foreach (var f in Directory.GetFiles(InstallDir))
                 try { File.Delete(f); } catch { /* in use: overwritten below or harmless */ }
-            File.Copy(Environment.ProcessPath!, InstalledExe, overwrite: true);
+            // The old copy may still be shutting down (e.g. putting windows back after a display change): retry briefly.
+            for (int attempt = 1; ; attempt++)
+            {
+                try { File.Copy(Environment.ProcessPath!, InstalledExe, overwrite: true); break; }
+                catch (IOException) when (attempt < 40) { Thread.Sleep(250); }
+            }
         }
 
         CreateShortcut(StartMenuShortcut, InstalledExe);

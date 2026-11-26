@@ -15,7 +15,10 @@ when you let go. Your other monitors stay where they are.
   The Desktop card shows your live wallpaper with that desktop's windows spread out so none overlap; click a window to go to the desktop with it in front.
 - ↔️ **Rearrange spaces**: drag cards in the overview to reorder them, or drag a card to a screen edge to send that app to another display.
 - 🏠 **Desktop space**: the first space on each monitor is its desktop with your normal windows. Three-finger swipe down jumps straight to it.
+- ✋ **Three-finger drag (optional)**: like the Mac accessibility setting. Rest three fingers on the trackpad and move them to
+  drag windows or select text without clicking; swipes then use four fingers.
 - ⌨️ **Alt+Tab still works**, and so do the taskbar and Win+Tab.
+- 💻 **Any Precision Touchpad**: an Apple Magic Trackpad, or the built-in trackpad of most modern Windows laptops.
 - 🪶 **Small and self-contained**: one exe, no admin rights, no .NET install needed. It runs from the tray.
 
 ## Install
@@ -49,6 +52,7 @@ when you let go. Your other monitors stay where they are.
 | Drag a card in the overview | Reorder that monitor's spaces (`Ctrl` + `←` / `→` does the same). Drag it to the edge facing another display and let go to move the app there |
 | Three-finger swipe down | That monitor's desktop space |
 | `Ctrl` + `Alt` + `Win` + `←` / `→` / `↑` / `↓` | The same from the keyboard |
+| Three-finger drag (if turned on in Settings) | Drag windows or select text without clicking. Lift to drop; put three fingers back quickly to keep dragging. The swipes above then use **four** fingers |
 
 
 A *space* is any maximized or full-screen (F11, borderless) window. Spaces stay in a stable order and new ones are added at
@@ -62,6 +66,10 @@ Open **SpaceSwipe** from the Start menu while it's running, or double-click its 
   shows their numbers. These settings follow the physical monitor even if Windows renumbers displays (e.g. after a KVM switch).
 - **Gestures**: left/right switching, slide animation, reverse direction, swipe up (overview, Windows Task View or
   nothing), swipe down (desktop or nothing), and swipe distance.
+- **Three-finger drag**: on/off and drag speed. Turning it on moves swipes to four fingers, so also set Windows'
+  *Touchpad → Four-finger gestures → Swipes* to **Nothing** (Settings reminds you if it isn't).
+  Windows dragged by the title bar are moved directly, which keeps them glued to the pointer in most apps. WinUI 3 apps
+  (e.g. Files) apply moves more slowly, so they follow in steps.
 - **Spaces**: whether borderless full-screen windows (games, F11 browsers) count, plus a list of apps that never count.
 - **Keyboard**: the `Ctrl` + `Alt` + `Win` + arrow shortcuts.
 - **About**: check for updates, the project page, setup checks and the log.

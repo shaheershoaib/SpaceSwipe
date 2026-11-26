@@ -32,6 +32,16 @@ internal static class Program
             SelfTest.Overview(args.Length > 1 ? args[1] : Path.Combine(Log.Dir, "selftest"), args.Length > 2 ? args[2] : null);
             return;
         }
+        if (args.Length > 1 && args[0].Equals("--move-test", StringComparison.OrdinalIgnoreCase))
+        {
+            SelfTest.Move(args[1], args.Length > 2 ? args[2] : Path.Combine(Log.Dir, "selftest"));
+            return;
+        }
+        if (args.Length > 0 && args[0].Equals("--drag-test", StringComparison.OrdinalIgnoreCase))
+        {
+            SelfTest.Drag(args.Length > 1 ? args[1] : Path.Combine(Log.Dir, "selftest"));
+            return;
+        }
         if (args.Length > 0 && args[0].Equals("--park-test", StringComparison.OrdinalIgnoreCase))
         {
             SelfTest.Park(args.Length > 1 ? args[1] : Path.Combine(Log.Dir, "selftest"));
@@ -169,6 +179,10 @@ internal sealed class Settings
     public List<string> DisabledMonitors { get; set; } = new();
     /// <summary>Ctrl+Alt+Win + arrow shortcuts.</summary>
     public bool KeyboardShortcuts { get; set; } = true;
+    /// <summary>macOS-style three-finger drag; space swipes then use four fingers.</summary>
+    public bool ThreeFingerDrag { get; set; }
+    /// <summary>Pointer speed while three-finger dragging (1 = default).</summary>
+    public double DragSpeed { get; set; } = 1.0;
 
     public static string FilePath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SpaceSwipe", "settings.json");
@@ -267,7 +281,8 @@ internal sealed class TrayContext : ApplicationContext
     readonly Parking parking = new();
     readonly NotifyIcon tray;
     OverviewForm? overview;
-    readonly System.Windows.Forms.Timer touchTimer = new() { Interval = 100 };
+    readonly System.Windows.Forms.Timer touchTimer = new() { Interval = 50 };
+    readonly ThreeFingerDrag fingerDrag = new();
 
     public TrayContext(Settings settings)
     {
@@ -276,11 +291,13 @@ internal sealed class TrayContext : ApplicationContext
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
         {
             Log.Write("unhandled: " + e.ExceptionObject);
+            try { fingerDrag.Cancel(); } catch { }
             try { parking.UnparkAll(); } catch { }
         };
         Application.ThreadException += (_, e) =>
         {
             Log.Write("ui exception: " + e.Exception);
+            try { fingerDrag.Cancel(); } catch { }
             try { parking.UnparkAll(); } catch { }
         };
         tracker.OwnWindows.Add(overlay.Handle);
@@ -289,6 +306,8 @@ internal sealed class TrayContext : ApplicationContext
         switcher = new SpaceSwitcher(tracker, overlay, settings, parking) { Suspended = () => overview != null };
 
         gestures.DeadZone = settings.DragDeadZone;
+        gestures.FingerDrag = fingerDrag;
+        ApplyFingerDrag();
         gestures.LogFrames = settings.LogTouchFrames;
         gestures.VDragBegan += OnVDragBegan;
         gestures.VDragMoved += OnVDragMoved;
@@ -348,6 +367,7 @@ internal sealed class TrayContext : ApplicationContext
         switch (m.Msg)
         {
             case WM_INPUT:
+                TouchpadGestures.InputDelayMs = unchecked(Environment.TickCount - GetMessageTime()); // time spent queued
                 gestures.OnWmInput(m.LParam);
                 break;
             case WM_HOTKEY:
@@ -480,7 +500,7 @@ internal sealed class TrayContext : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
 
         menu.Items.Add(new ToolStripMenuItem("Settings…", null, (_, _) => ShowSettings()) { Font = new Font(menu.Font, FontStyle.Bold) });
-        enabledItem = Toggle("SpaceSwipe is on", settings.Enabled, v => { settings.Enabled = v; settings.Save(); });
+        enabledItem = Toggle("SpaceSwipe is on", settings.Enabled, v => { settings.Enabled = v; settings.Save(); ApplySettings(); });
         menu.Items.Add(enabledItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Project page", null, (_, _) =>
@@ -519,6 +539,15 @@ internal sealed class TrayContext : ApplicationContext
         RegisterHotkeys();
         if (enabledItem != null && enabledItem.Checked != settings.Enabled) enabledItem.Checked = settings.Enabled;
         tracker.Snapshot(); // re-evaluate spaces (excluded apps, borderless full screen)
+        ApplyFingerDrag();
+    }
+
+    /// <summary>Three-finger drag on: swipes move to four fingers (like on a Mac).</summary>
+    void ApplyFingerDrag()
+    {
+        fingerDrag.Enabled = settings.Enabled && settings.ThreeFingerDrag;
+        fingerDrag.Speed = Math.Clamp(settings.DragSpeed, 0.3, 3);
+        gestures.SwipeFingers = fingerDrag.Enabled ? 4 : 3;
     }
 
     void RegisterHotkeys()
@@ -543,6 +572,7 @@ internal sealed class TrayContext : ApplicationContext
     {
         Log.Write("SpaceSwipe exiting");
         touchTimer.Stop();
+        fingerDrag.Cancel(); // never leave the mouse button held down
         tray.Visible = false;
         tray.Dispose();
         UnregisterHotKey(msg.Handle, HK_PREV);

@@ -90,14 +90,15 @@ internal sealed class SettingsForm : Form
     void BuildGestures()
     {
         Header("Gestures");
-        Check("Three-finger drag left / right switches apps on that display", settings.SwipeSideways, v => settings.SwipeSideways = v);
+        Note("Swipes use three fingers, or four while three-finger drag (below) is on.");
+        Check("Swipe left / right switches apps on that display", settings.SwipeSideways, v => settings.SwipeSideways = v);
         Check("Slide animation (follows your fingers)", settings.Animate, v => settings.Animate = v);
         Check("Reverse direction (off = natural, like macOS)", settings.ReverseDirection, v => settings.ReverseDirection = v);
 
-        Choice("Three-finger swipe up", new[] { "App overview (this display)", "Windows Task View", "Nothing" },
+        Choice("Swipe up", new[] { "App overview (this display)", "Windows Task View", "Nothing" },
             settings.SwipeUpOverview ? 0 : settings.SwipeUpTaskView ? 1 : 2,
             i => { settings.SwipeUpOverview = i == 0; settings.SwipeUpTaskView = i == 1; });
-        Choice("Three-finger swipe down", new[] { "This display's desktop", "Nothing" },
+        Choice("Swipe down", new[] { "This display's desktop", "Nothing" },
             settings.SwipeDownShowsDesktop ? 0 : 1,
             i => settings.SwipeDownShowsDesktop = i == 0);
 
@@ -113,6 +114,39 @@ internal sealed class SettingsForm : Form
         void UpdateHint() => hint.Text = slider.Value <= 40 ? "short" : slider.Value >= 65 ? "long" : "medium";
         UpdateHint();
         slider.ValueChanged += (_, _) => { settings.FullSwipeFraction = slider.Value / 100.0; UpdateHint(); Save(); };
+        row.Controls.Add(slider);
+        row.Controls.Add(hint);
+
+        BuildThreeFingerDrag();
+    }
+
+    void BuildThreeFingerDrag()
+    {
+        Header("Three-finger drag");
+        Note("Like the Mac setting: rest three fingers on the touchpad and move them to drag windows or select text, " +
+             "without clicking. Lift your fingers to drop (put them back quickly to keep dragging). " +
+             "Swipes between apps then use four fingers.");
+        var fourHint = new Label
+        {
+            AutoSize = true, MaximumSize = new Size(530, 0), ForeColor = Color.FromArgb(160, 90, 0), Margin = new Padding(0, 0, 0, 6),
+            Text = "Windows' own four-finger swipes are on: set Touchpad → Four-finger gestures → Swipes to \"Nothing\".",
+        };
+        void UpdateFourHint() => fourHint.Visible = settings.ThreeFingerDrag && !SystemCheck.WindowsFourFingerSwipesOff();
+        Check("Use three-finger drag", settings.ThreeFingerDrag, v => { settings.ThreeFingerDrag = v; UpdateFourHint(); });
+        body.Controls.Add(fourHint);
+        UpdateFourHint();
+
+        var row = Row("Drag speed");
+        var slider = new TrackBar
+        {
+            Minimum = 5, Maximum = 25, TickFrequency = 5, SmallChange = 1, LargeChange = 5,
+            Value = Math.Clamp((int)Math.Round(settings.DragSpeed * 10), 5, 25),
+            Width = 260, AutoSize = false, Height = 36,
+        };
+        var hint = new Label { AutoSize = true, ForeColor = Color.FromArgb(88, 88, 96), Margin = new Padding(6, 8, 0, 0) };
+        void UpdateHint() => hint.Text = slider.Value <= 8 ? "slower" : slider.Value >= 14 ? "faster" : "normal";
+        UpdateHint();
+        slider.ValueChanged += (_, _) => { settings.DragSpeed = slider.Value / 10.0; UpdateHint(); Save(); };
         row.Controls.Add(slider);
         row.Controls.Add(hint);
     }

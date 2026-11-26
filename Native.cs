@@ -243,4 +243,34 @@ internal static class Native
     };
 
     public static void Send(params INPUT[] inputs) => SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
+
+    public const uint INPUT_MOUSE = 0, MOUSEEVENTF_MOVE = 0x1, MOUSEEVENTF_LEFTDOWN = 0x2, MOUSEEVENTF_LEFTUP = 0x4,
+                      MOUSEEVENTF_ABSOLUTE = 0x8000, MOUSEEVENTF_VIRTUALDESK = 0x4000;
+    public const int SM_XVIRTUALSCREEN = 76, SM_CXVIRTUALSCREEN = 78;
+    [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] public static extern bool IsHungAppWindow(IntPtr h);
+    [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW")]
+    public static extern bool SystemParametersInfoInt(uint action, uint param, out int value, uint winIni);
+    public const uint SPI_GETMOUSESPEED = 0x70;
+    public const uint SWP_ASYNCWINDOWPOS = 0x4000;
+    public const int HTCAPTION = 2;
+
+    /// <summary>When the message being handled was posted (milliseconds, same clock as Environment.TickCount).</summary>
+    [DllImport("user32.dll")] public static extern int GetMessageTime();
+
+    /// <summary>A mouse event; dx/dy are only used with MOUSEEVENTF_ABSOLUTE (0..65535 across the virtual screen).</summary>
+    public static INPUT Mouse(uint flags, int dx = 0, int dy = 0) => new()
+    {
+        type = INPUT_MOUSE,
+        u = new InputUnion { mi = new MOUSEINPUT { dx = dx, dy = dy, dwFlags = flags } },
+    };
+
+    /// <summary>Mouse event that moves the pointer to a screen point (physical pixels), plus any button flags.</summary>
+    public static INPUT MouseTo(int x, int y, uint extraFlags = 0)
+    {
+        int vx = GetSystemMetrics(SM_XVIRTUALSCREEN), vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        int vw = Math.Max(2, GetSystemMetrics(SM_CXVIRTUALSCREEN)), vh = Math.Max(2, GetSystemMetrics(SM_CYVIRTUALSCREEN));
+        int nx = (int)Math.Round((x - vx) * 65535.0 / (vw - 1)), ny = (int)Math.Round((y - vy) * 65535.0 / (vh - 1));
+        return Mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | extraFlags, nx, ny);
+    }
 }
